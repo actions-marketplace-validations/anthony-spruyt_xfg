@@ -23,6 +23,8 @@ import {
 import { RepoConfig } from "./config.js";
 import { RepoInfo } from "./repo-detector.js";
 import { ProcessorOptions } from "./repository-processor.js";
+import { writeSummary, RepoResult } from "./github-summary.js";
+import { buildRepoResult, buildErrorResult } from "./summary-utils.js";
 
 /**
  * Processor interface for dependency injection in tests.
@@ -177,6 +179,7 @@ async function main(): Promise<void> {
   console.log(`Branch: ${branchName}\n`);
 
   const processor = defaultProcessorFactory();
+  const results: RepoResult[] = [];
 
   for (let i = 0; i < config.repos.length; i++) {
     const repoConfig = config.repos[i];
@@ -201,8 +204,8 @@ async function main(): Promise<void> {
         githubHosts: config.githubHosts,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error(current, repoConfig.git, message);
+      logger.error(current, repoConfig.git, String(error));
+      results.push(buildErrorResult(repoConfig.git, error));
       continue;
     }
 
@@ -224,28 +227,35 @@ async function main(): Promise<void> {
         noDelete: options.noDelete,
       });
 
+      const repoResult = buildRepoResult(repoName, repoConfig, result);
+      results.push(repoResult);
+
       if (result.skipped) {
         logger.skip(current, repoName, result.message);
       } else if (result.success) {
-        let message = result.prUrl ? `PR: ${result.prUrl}` : result.message;
-        if (result.mergeResult) {
-          if (result.mergeResult.merged) {
-            message += " (merged)";
-          } else if (result.mergeResult.autoMergeEnabled) {
-            message += " (auto-merge enabled)";
-          }
-        }
-        logger.success(current, repoName, message);
+        logger.success(current, repoName, repoResult.message);
       } else {
         logger.error(current, repoName, result.message);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error(current, repoName, message);
+      logger.error(current, repoName, String(error));
+      results.push(buildErrorResult(repoName, error));
     }
   }
 
   logger.summary();
+
+  // Write GitHub Actions job summary if running in GitHub Actions
+  const succeeded = results.filter((r) => r.status === "succeeded").length;
+  const skipped = results.filter((r) => r.status === "skipped").length;
+  const failed = results.filter((r) => r.status === "failed").length;
+  writeSummary({
+    total: config.repos.length,
+    succeeded,
+    skipped,
+    failed,
+    results,
+  });
 
   if (logger.hasFailures()) {
     process.exit(1);

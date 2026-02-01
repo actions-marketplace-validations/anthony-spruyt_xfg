@@ -34,6 +34,7 @@ import {
   loadManifest,
   saveManifest,
   updateManifest,
+  updateManifestRulesets,
   MANIFEST_FILENAME,
 } from "./manifest.js";
 import { GitHubAppTokenManager } from "./github-app-token-manager.js";
@@ -129,29 +130,15 @@ export class RepositoryProcessor {
     this.retries = options.retries ?? 3;
     this.executor = options.executor ?? defaultExecutor;
 
-    // For GitHub repos with token manager, get installation token
-    let token: string | undefined;
-    if (this.tokenManager && isGitHubRepo(repoInfo)) {
-      try {
-        const tokenResult = await this.tokenManager.getTokenForRepo(
-          repoInfo as GitHubRepoInfo
-        );
-        if (tokenResult === null) {
-          // No installation found for this owner - skip the repo
-          return {
-            success: true,
-            repoName,
-            message: `No GitHub App installation found for ${repoInfo.owner}`,
-            skipped: true,
-          };
-        }
-        token = tokenResult;
-      } catch (error) {
-        // Token retrieval failed - continue without token and let auth fail naturally
-        this.log.info(
-          `Warning: Failed to get GitHub App token: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+    // Get installation token if needed
+    const token = await this.getInstallationToken(repoInfo);
+    if (token === null) {
+      return {
+        success: true,
+        repoName,
+        message: `No GitHub App installation found for ${repoInfo.owner}`,
+        skipped: true,
+      };
     }
 
     this.gitOps = this.gitOpsFactory({
@@ -589,6 +576,228 @@ export class RepositoryProcessor {
           this.gitOps.cleanWorkspace();
         } catch {
           // Ignore cleanup errors - best effort
+        }
+      }
+    }
+  }
+
+  /**
+   * Gets installation token for GitHub repos when GitHub App is configured.
+   * Returns undefined if no token needed or token retrieval fails.
+   * Returns null if no installation found (caller should skip repo).
+   */
+  private async getInstallationToken(
+    repoInfo: RepoInfo
+  ): Promise<string | null | undefined> {
+    if (!this.tokenManager || !isGitHubRepo(repoInfo)) {
+      return undefined;
+    }
+
+    try {
+      return await this.tokenManager.getTokenForRepo(
+        repoInfo as GitHubRepoInfo
+      );
+    } catch (error) {
+      this.log.info(
+        `Warning: Failed to get GitHub App token: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Updates only the manifest file with ruleset tracking.
+   * Used by protect command to persist state for deleteOrphaned.
+   * Reuses existing clone/commit/PR workflow.
+   */
+  async updateManifestOnly(
+    repoInfo: RepoInfo,
+    repoConfig: RepoConfig,
+    options: ProcessorOptions,
+    manifestUpdate: { rulesets: string[] }
+  ): Promise<ProcessorResult> {
+    const repoName = getRepoDisplayName(repoInfo);
+    const { branchName, workDir, dryRun } = options;
+    this.retries = options.retries ?? 3;
+    this.executor = options.executor ?? defaultExecutor;
+
+    // Get installation token if needed
+    const token = await this.getInstallationToken(repoInfo);
+    if (token === null) {
+      return {
+        success: true,
+        repoName,
+        message: `No GitHub App installation found for ${repoInfo.owner}`,
+        skipped: true,
+      };
+    }
+
+    this.gitOps = this.gitOpsFactory({
+      workDir,
+      dryRun,
+      retries: this.retries,
+    });
+
+    const mergeMode = repoConfig.prOptions?.merge ?? "auto";
+    const isDirectMode = mergeMode === "direct";
+
+    try {
+      // Clone repo and get base branch
+      this.log.info("Cleaning workspace...");
+      this.gitOps.cleanWorkspace();
+      this.log.info("Cloning repository...");
+      await this.gitOps.clone(repoInfo.gitUrl);
+      const { branch: baseBranch } = await this.gitOps.getDefaultBranch();
+
+      // Load and update manifest
+      const existingManifest = loadManifest(workDir);
+      const rulesetsWithDeleteOrphaned = new Map<string, boolean | undefined>(
+        manifestUpdate.rulesets.map((name) => [name, true])
+      );
+      const { manifest: newManifest } = updateManifestRulesets(
+        existingManifest,
+        options.configId,
+        rulesetsWithDeleteOrphaned
+      );
+
+      // Check if manifest changed
+      const existingConfigs = existingManifest?.configs ?? {};
+      if (
+        JSON.stringify(existingConfigs) === JSON.stringify(newManifest.configs)
+      ) {
+        return {
+          success: true,
+          repoName,
+          message: "No manifest changes detected",
+          skipped: true,
+        };
+      }
+
+      // Dry-run mode: report what would happen
+      if (dryRun) {
+        this.log.info(`Would update ${MANIFEST_FILENAME} with rulesets`);
+        return {
+          success: true,
+          repoName,
+          message: "Would update manifest (dry-run)",
+        };
+      }
+
+      // Prepare branch for commit
+      if (!isDirectMode) {
+        const strategy = getPRStrategy(repoInfo, this.executor);
+        if (
+          await strategy.closeExistingPR({
+            repoInfo,
+            branchName,
+            baseBranch,
+            workDir,
+            retries: this.retries,
+            token,
+          })
+        ) {
+          await this.gitOps.fetch({ prune: true });
+        }
+        await this.gitOps.createBranch(branchName);
+      }
+
+      // Save manifest and commit
+      saveManifest(workDir, newManifest);
+      await this.executor.exec("git add -A", workDir);
+      if (!(await this.gitOps.hasStagedChanges())) {
+        return {
+          success: true,
+          repoName,
+          message: "No changes detected after staging",
+          skipped: true,
+        };
+      }
+
+      const pushBranch = isDirectMode ? baseBranch : branchName;
+      const commitStrategy = getCommitStrategy(repoInfo, this.executor);
+      try {
+        await commitStrategy.commit({
+          repoInfo,
+          branchName: pushBranch,
+          message: "chore: update manifest with ruleset tracking",
+          fileChanges: [
+            {
+              path: MANIFEST_FILENAME,
+              content: JSON.stringify(newManifest, null, 2) + "\n",
+            },
+          ],
+          workDir,
+          retries: this.retries,
+          force: !isDirectMode,
+          token,
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (
+          isDirectMode &&
+          (msg.includes("rejected") ||
+            msg.includes("protected") ||
+            msg.includes("denied"))
+        ) {
+          return {
+            success: false,
+            repoName,
+            message: `Push to '${baseBranch}' was rejected (likely branch protection).`,
+          };
+        }
+        throw error;
+      }
+
+      if (isDirectMode) {
+        return {
+          success: true,
+          repoName,
+          message: `Manifest updated directly on ${baseBranch}`,
+        };
+      }
+
+      // Create PR and handle merge
+      const prResult = await createPR({
+        repoInfo,
+        branchName,
+        baseBranch,
+        files: [{ fileName: MANIFEST_FILENAME, action: "update" as const }],
+        workDir,
+        dryRun: false,
+        retries: this.retries,
+        executor: this.executor,
+        token,
+      });
+
+      if (prResult.success && prResult.url && mergeMode !== "manual") {
+        await mergePR({
+          repoInfo,
+          prUrl: prResult.url,
+          mergeConfig: {
+            mode: mergeMode,
+            strategy: repoConfig.prOptions?.mergeStrategy ?? "squash",
+            deleteBranch: repoConfig.prOptions?.deleteBranch ?? true,
+          },
+          workDir,
+          dryRun: false,
+          retries: this.retries,
+          executor: this.executor,
+          token,
+        });
+      }
+
+      return {
+        success: prResult.success,
+        repoName,
+        message: prResult.message,
+        prUrl: prResult.url,
+      };
+    } finally {
+      if (this.gitOps) {
+        try {
+          this.gitOps.cleanWorkspace();
+        } catch {
+          // Ignore cleanup errors
         }
       }
     }

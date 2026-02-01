@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { program } from "commander";
+import { program, Command } from "commander";
 import { resolve, join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,13 @@ import { RepoInfo } from "./repo-detector.js";
 import { ProcessorOptions } from "./repository-processor.js";
 import { writeSummary, RepoResult } from "./github-summary.js";
 import { buildRepoResult, buildErrorResult } from "./summary-utils.js";
+import {
+  RulesetProcessor,
+  RulesetProcessorOptions,
+  RulesetProcessorResult,
+} from "./ruleset-processor.js";
+import { getManagedRulesets } from "./manifest.js";
+import { isGitHubRepo } from "./repo-detector.js";
 
 /**
  * Processor interface for dependency injection in tests.
@@ -49,69 +56,72 @@ export type ProcessorFactory = () => IRepositoryProcessor;
 export const defaultProcessorFactory: ProcessorFactory = () =>
   new RepositoryProcessor();
 
-interface CLIOptions {
+/**
+ * Ruleset processor interface for dependency injection in tests.
+ */
+export interface IRulesetProcessor {
+  process(
+    repoConfig: RepoConfig,
+    repoInfo: RepoInfo,
+    options: RulesetProcessorOptions
+  ): Promise<RulesetProcessorResult>;
+}
+
+/**
+ * Factory function type for creating ruleset processors.
+ */
+export type RulesetProcessorFactory = () => IRulesetProcessor;
+
+/**
+ * Default factory that creates a real RulesetProcessor.
+ */
+export const defaultRulesetProcessorFactory: RulesetProcessorFactory = () =>
+  new RulesetProcessor();
+
+// =============================================================================
+// Shared CLI Options
+// =============================================================================
+
+interface SharedOptions {
   config: string;
   dryRun?: boolean;
   workDir?: string;
   retries?: number;
+  noDelete?: boolean;
+}
+
+interface SyncOptions extends SharedOptions {
   branch?: string;
   merge?: MergeMode;
   mergeStrategy?: MergeStrategy;
   deleteBranch?: boolean;
-  noDelete?: boolean;
 }
 
-program
-  .name("xfg")
-  .description("Sync JSON configuration files across multiple repositories")
-  .version(packageJson.version)
-  .requiredOption("-c, --config <path>", "Path to YAML config file")
-  .option("-d, --dry-run", "Show what would be done without making changes")
-  .option("-w, --work-dir <path>", "Temporary directory for cloning", "./tmp")
-  .option(
-    "-r, --retries <number>",
-    "Number of retries for network operations (0 to disable)",
-    (v) => parseInt(v, 10),
-    3
-  )
-  .option(
-    "-b, --branch <name>",
-    "Override the branch name (default: chore/sync-{filename} or chore/sync-config)"
-  )
-  .option(
-    "-m, --merge <mode>",
-    "PR merge mode: manual, auto (default, merge when checks pass), force (bypass requirements), direct (push to default branch, no PR)",
-    (value: string): MergeMode => {
-      const valid: MergeMode[] = ["manual", "auto", "force", "direct"];
-      if (!valid.includes(value as MergeMode)) {
-        throw new Error(
-          `Invalid merge mode: ${value}. Valid: ${valid.join(", ")}`
-        );
-      }
-      return value as MergeMode;
-    }
-  )
-  .option(
-    "--merge-strategy <strategy>",
-    "Merge strategy: merge, squash (default), rebase",
-    (value: string): MergeStrategy => {
-      const valid: MergeStrategy[] = ["merge", "squash", "rebase"];
-      if (!valid.includes(value as MergeStrategy)) {
-        throw new Error(
-          `Invalid merge strategy: ${value}. Valid: ${valid.join(", ")}`
-        );
-      }
-      return value as MergeStrategy;
-    }
-  )
-  .option("--delete-branch", "Delete source branch after merge")
-  .option(
-    "--no-delete",
-    "Skip deletion of orphaned files even if deleteOrphaned is configured"
-  )
-  .parse();
+type ProtectOptions = SharedOptions;
 
-const options = program.opts<CLIOptions>();
+/**
+ * Adds shared options to a command.
+ */
+function addSharedOptions(cmd: Command): Command {
+  return cmd
+    .requiredOption("-c, --config <path>", "Path to YAML config file")
+    .option("-d, --dry-run", "Show what would be done without making changes")
+    .option("-w, --work-dir <path>", "Temporary directory for cloning", "./tmp")
+    .option(
+      "-r, --retries <number>",
+      "Number of retries for network operations (0 to disable)",
+      (v) => parseInt(v, 10),
+      3
+    )
+    .option(
+      "--no-delete",
+      "Skip deletion of orphaned resources even if deleteOrphaned is configured"
+    );
+}
+
+// =============================================================================
+// Sync Command
+// =============================================================================
 
 /**
  * Get unique file names from all repos in the config
@@ -149,7 +159,10 @@ function formatFileNames(fileNames: string[]): string {
   return `${fileNames.length} files`;
 }
 
-async function main(): Promise<void> {
+export async function runSync(
+  options: SyncOptions,
+  processorFactory: ProcessorFactory = defaultProcessorFactory
+): Promise<void> {
   const configPath = resolve(options.config);
 
   if (!existsSync(configPath)) {
@@ -178,7 +191,7 @@ async function main(): Promise<void> {
   console.log(`Target files: ${formatFileNames(fileNames)}`);
   console.log(`Branch: ${branchName}\n`);
 
-  const processor = defaultProcessorFactory();
+  const processor = processorFactory();
   const results: RepoResult[] = [];
 
   for (let i = 0; i < config.repos.length; i++) {
@@ -262,7 +275,238 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+// =============================================================================
+// Protect Command
+// =============================================================================
+
+export async function runProtect(
+  options: ProtectOptions,
+  processorFactory: RulesetProcessorFactory = defaultRulesetProcessorFactory
+): Promise<void> {
+  const configPath = resolve(options.config);
+
+  if (!existsSync(configPath)) {
+    console.error(`Config file not found: ${configPath}`);
+    process.exit(1);
+  }
+
+  console.log(`Loading config from: ${configPath}`);
+  if (options.dryRun) {
+    console.log("Running in DRY RUN mode - no changes will be made\n");
+  }
+
+  const config = loadConfig(configPath);
+
+  // Check if any repos have rulesets configured or have managed rulesets to clean up
+  const reposWithRulesets = config.repos.filter(
+    (r) => r.settings?.rulesets && Object.keys(r.settings.rulesets).length > 0
+  );
+
+  if (reposWithRulesets.length === 0) {
+    console.log(
+      "No rulesets configured. Add settings.rulesets to your config to manage GitHub Rulesets."
+    );
+    return;
+  }
+
+  console.log(`Found ${reposWithRulesets.length} repositories with rulesets\n`);
+
+  const processor = processorFactory();
+  const results: RepoResult[] = [];
+  let successCount = 0;
+  let failCount = 0;
+  let skipCount = 0;
+
+  for (let i = 0; i < config.repos.length; i++) {
+    const repoConfig = config.repos[i];
+
+    // Skip repos without rulesets
+    if (
+      !repoConfig.settings?.rulesets ||
+      Object.keys(repoConfig.settings.rulesets).length === 0
+    ) {
+      continue;
+    }
+
+    let repoInfo;
+    try {
+      repoInfo = parseGitUrl(repoConfig.git, {
+        githubHosts: config.githubHosts,
+      });
+    } catch (error) {
+      logger.error(i + 1, repoConfig.git, String(error));
+      results.push(buildErrorResult(repoConfig.git, error));
+      failCount++;
+      continue;
+    }
+
+    const repoName = getRepoDisplayName(repoInfo);
+
+    // Skip non-GitHub repos
+    if (!isGitHubRepo(repoInfo)) {
+      logger.skip(
+        i + 1,
+        repoName,
+        "GitHub Rulesets only supported for GitHub repos"
+      );
+      skipCount++;
+      continue;
+    }
+
+    // Note: For protect command, we don't clone repos - we work with the API directly.
+    // Manifest handling for tracking managed rulesets would require cloning.
+    // For now, use an empty list - orphan deletion requires the sync command first.
+    const managedRulesets = getManagedRulesets(null, config.id);
+
+    try {
+      logger.progress(i + 1, repoName, "Processing rulesets...");
+
+      const result = await processor.process(repoConfig, repoInfo, {
+        configId: config.id,
+        dryRun: options.dryRun,
+        managedRulesets,
+        noDelete: options.noDelete,
+      });
+
+      if (result.skipped) {
+        logger.skip(i + 1, repoName, result.message);
+        skipCount++;
+      } else if (result.success) {
+        logger.success(i + 1, repoName, result.message);
+        successCount++;
+      } else {
+        logger.error(i + 1, repoName, result.message);
+        failCount++;
+      }
+
+      results.push({
+        repoName,
+        status: result.skipped
+          ? "skipped"
+          : result.success
+            ? "succeeded"
+            : "failed",
+        message: result.message,
+      });
+    } catch (error) {
+      logger.error(i + 1, repoName, String(error));
+      results.push(buildErrorResult(repoName, error));
+      failCount++;
+    }
+  }
+
+  // Summary
+  console.log("\n" + "=".repeat(50));
+  console.log(
+    `Completed: ${successCount} succeeded, ${skipCount} skipped, ${failCount} failed`
+  );
+
+  // Write GitHub Actions job summary if available
+  writeSummary({
+    total: reposWithRulesets.length,
+    succeeded: successCount,
+    skipped: skipCount,
+    failed: failCount,
+    results,
+  });
+
+  if (failCount > 0) {
+    process.exit(1);
+  }
+}
+
+// =============================================================================
+// CLI Program
+// =============================================================================
+
+program
+  .name("xfg")
+  .description(
+    "Sync configuration files and manage GitHub Rulesets across repositories"
+  )
+  .version(packageJson.version);
+
+// Sync command (file synchronization)
+const syncCommand = new Command("sync")
+  .description("Sync configuration files across repositories (default command)")
+  .option(
+    "-b, --branch <name>",
+    "Override the branch name (default: chore/sync-{filename} or chore/sync-config)"
+  )
+  .option(
+    "-m, --merge <mode>",
+    "PR merge mode: manual, auto (default, merge when checks pass), force (bypass requirements), direct (push to default branch, no PR)",
+    (value: string): MergeMode => {
+      const valid: MergeMode[] = ["manual", "auto", "force", "direct"];
+      if (!valid.includes(value as MergeMode)) {
+        throw new Error(
+          `Invalid merge mode: ${value}. Valid: ${valid.join(", ")}`
+        );
+      }
+      return value as MergeMode;
+    }
+  )
+  .option(
+    "--merge-strategy <strategy>",
+    "Merge strategy: merge, squash (default), rebase",
+    (value: string): MergeStrategy => {
+      const valid: MergeStrategy[] = ["merge", "squash", "rebase"];
+      if (!valid.includes(value as MergeStrategy)) {
+        throw new Error(
+          `Invalid merge strategy: ${value}. Valid: ${valid.join(", ")}`
+        );
+      }
+      return value as MergeStrategy;
+    }
+  )
+  .option("--delete-branch", "Delete source branch after merge")
+  .action((opts) => {
+    runSync(opts as SyncOptions).catch((error) => {
+      console.error("Fatal error:", error);
+      process.exit(1);
+    });
+  });
+
+addSharedOptions(syncCommand);
+program.addCommand(syncCommand);
+
+// Protect command (ruleset management)
+const protectCommand = new Command("protect")
+  .description("Manage GitHub Rulesets for repositories")
+  .action((opts) => {
+    runProtect(opts as ProtectOptions).catch((error) => {
+      console.error("Fatal error:", error);
+      process.exit(1);
+    });
+  });
+
+addSharedOptions(protectCommand);
+program.addCommand(protectCommand);
+
+// Only parse CLI when run directly (not when imported for testing)
+const isTestRun =
+  process.argv.includes("--test") ||
+  process.argv.some((arg) => arg.includes(".test.ts")) ||
+  process.env.NODE_TEST_CONTEXT !== undefined;
+
+if (!isTestRun) {
+  // Handle backwards compatibility: if no subcommand is provided, default to sync
+  // This maintains compatibility with existing usage like `xfg -c config.yaml`
+  const args = process.argv.slice(2);
+  const subcommands = ["sync", "protect", "help"];
+  const versionFlags = ["-V", "--version"];
+
+  // Check if the first argument is a subcommand or version flag
+  const firstArg = args[0];
+  const isSubcommand = firstArg && subcommands.includes(firstArg);
+  const isVersionFlag = firstArg && versionFlags.includes(firstArg);
+
+  if (isSubcommand || isVersionFlag) {
+    // Explicit subcommand or version flag - parse normally
+    program.parse();
+  } else {
+    // No subcommand - prepend 'sync' for backwards compatibility
+    // This handles: `xfg -c config.yaml`, `xfg --help`, `xfg` (no args)
+    program.parse(["node", "xfg", "sync", ...args]);
+  }
+}

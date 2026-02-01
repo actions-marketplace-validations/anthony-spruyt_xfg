@@ -463,6 +463,92 @@ repos:
         "Should accept --delete-branch flag"
       );
     });
+
+    test("sync command fails with settings-only config", () => {
+      writeFileSync(
+        testConfigPath,
+        `
+id: settings-only
+settings:
+  rulesets:
+    main-protection:
+      target: branch
+      enforcement: active
+repos:
+  - git: git@github.com:test/repo.git
+`
+      );
+
+      const result = runCLI(["sync", "-c", testConfigPath, "--dry-run"]);
+      assert.equal(result.success, false);
+      const output = result.stdout + result.stderr;
+      assert.ok(
+        output.includes("'sync' command requires a 'files' section") ||
+          output.includes("requires a 'files' section"),
+        `Expected files requirement error, got: ${output}`
+      );
+    });
+
+    test("settings command fails with files-only config", () => {
+      writeFileSync(
+        testConfigPath,
+        `
+id: files-only
+files:
+  config.json:
+    content:
+      key: value
+repos:
+  - git: git@github.com:test/repo.git
+`
+      );
+
+      const result = runCLI(["settings", "-c", testConfigPath, "--dry-run"]);
+      assert.equal(result.success, false);
+      const output = result.stdout + result.stderr;
+      assert.ok(
+        output.includes("'settings' command requires") ||
+          output.includes("No actionable settings"),
+        `Expected settings requirement error, got: ${output}`
+      );
+    });
+
+    test("settings command succeeds with settings-only config", () => {
+      writeFileSync(
+        testConfigPath,
+        `
+id: settings-only
+settings:
+  rulesets:
+    main-protection:
+      target: branch
+      enforcement: active
+      conditions:
+        refName:
+          include: ["refs/heads/main"]
+          exclude: []
+repos:
+  - git: git@github.com:test/invalid-repo.git
+`
+      );
+
+      // Will fail on API call but should get past validation
+      const result = runCLI([
+        "settings",
+        "-c",
+        testConfigPath,
+        "--dry-run",
+        "-w",
+        `${testDir}/work`,
+      ]);
+      const output = result.stdout + result.stderr;
+      // Should show it's processing, not validation error
+      assert.ok(
+        output.includes("Loading config") ||
+          output.includes("repositories with rulesets"),
+        `Expected processing output, got: ${output}`
+      );
+    });
   });
 
   describe("config validation", () => {
@@ -1100,8 +1186,8 @@ describe("settings command CLI", () => {
     });
   });
 
-  describe("no rulesets configured (early exit)", () => {
-    test("shows message when no repos have rulesets", () => {
+  describe("config validation", () => {
+    test("fails when no settings configured", () => {
       writeFileSync(
         settingsTestConfigPath,
         `
@@ -1118,13 +1204,14 @@ repos:
       const result = runCLI(["settings", "-c", settingsTestConfigPath]);
       const output = result.stdout + result.stderr;
       assert.ok(
-        output.includes("No rulesets configured"),
-        "Should show no rulesets message"
+        output.includes("'settings' command requires") ||
+          output.includes("No actionable settings"),
+        `Should show settings requirement error, got: ${output}`
       );
-      assert.ok(result.success, "Should succeed even with no rulesets");
+      assert.equal(result.success, false, "Should fail when no settings");
     });
 
-    test("shows message when rulesets object is empty", () => {
+    test("fails when rulesets object is empty", () => {
       writeFileSync(
         settingsTestConfigPath,
         `
@@ -1143,9 +1230,11 @@ repos:
       const result = runCLI(["settings", "-c", settingsTestConfigPath]);
       const output = result.stdout + result.stderr;
       assert.ok(
-        output.includes("No rulesets configured"),
-        "Should show no rulesets message for empty rulesets"
+        output.includes("No actionable settings") ||
+          output.includes("'settings' command requires"),
+        `Should show actionable settings error, got: ${output}`
       );
+      assert.equal(result.success, false, "Should fail with empty rulesets");
     });
   });
 });
@@ -1158,8 +1247,6 @@ import {
   runSettings,
   IRulesetProcessor,
   RulesetProcessorFactory,
-  IRepositoryProcessor,
-  ProcessorFactory,
 } from "./index.js";
 import type { RulesetProcessorResult } from "./ruleset-processor.js";
 

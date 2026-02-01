@@ -1,6 +1,11 @@
 import { test, describe } from "node:test";
 import { strict as assert } from "node:assert";
-import { validateRawConfig } from "./config-validator.js";
+import {
+  validateRawConfig,
+  validateForSync,
+  validateForSettings,
+  hasActionableSettings,
+} from "./config-validator.js";
 import type { RawConfig } from "./config.js";
 
 describe("validateRawConfig", () => {
@@ -115,7 +120,7 @@ describe("validateRawConfig", () => {
   });
 
   describe("files validation", () => {
-    test("throws when files is missing", () => {
+    test("throws when files is missing and no settings", () => {
       const config = {
         id: "test-config",
         repos: [{ git: "git@github.com:org/repo.git" }],
@@ -123,16 +128,20 @@ describe("validateRawConfig", () => {
 
       assert.throws(
         () => validateRawConfig(config),
-        /Config missing required field: files/
+        /Config requires at least one of: 'files' or 'settings'/
       );
     });
 
-    test("throws when files is empty", () => {
-      const config = createValidConfig({ files: {} });
+    test("throws when files is empty and no settings", () => {
+      const config = {
+        id: "test-config",
+        files: {},
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      } as RawConfig;
 
       assert.throws(
         () => validateRawConfig(config),
-        /Config files object cannot be empty/
+        /Config requires at least one of: 'files' or 'settings'/
       );
     });
 
@@ -2057,5 +2066,255 @@ describe("validateRawConfig", () => {
         /conditions\.refName\.exclude must be an array of strings/
       );
     });
+  });
+
+  describe("files/settings decoupling", () => {
+    test("accepts config with only settings (no files)", () => {
+      const config: RawConfig = {
+        id: "settings-only",
+        settings: {
+          rulesets: {
+            "main-protection": {
+              target: "branch",
+              enforcement: "active",
+            },
+          },
+        },
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      };
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("throws when config has neither files nor settings", () => {
+      const config = {
+        id: "empty-config",
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      } as RawConfig;
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /Config requires at least one of: 'files' or 'settings'/
+      );
+    });
+
+    test("accepts config with only files (no settings)", () => {
+      const config: RawConfig = {
+        id: "files-only",
+        files: {
+          "config.json": { content: { key: "value" } },
+        },
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      };
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("accepts config with both files and settings", () => {
+      const config: RawConfig = {
+        id: "full-config",
+        files: {
+          "config.json": { content: { key: "value" } },
+        },
+        settings: {
+          rulesets: {
+            "main-protection": {
+              target: "branch",
+              enforcement: "active",
+            },
+          },
+        },
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      };
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("validates files structure when files is present", () => {
+      const config: RawConfig = {
+        id: "bad-files",
+        files: {
+          "../escape.json": { content: {} }, // Invalid path
+        },
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      };
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /Invalid fileName.*must be a relative path/
+      );
+    });
+
+    test("skips files validation when files is absent", () => {
+      const config: RawConfig = {
+        id: "settings-only",
+        settings: {
+          rulesets: {
+            "main-protection": { target: "branch" },
+          },
+        },
+        repos: [{ git: "git@github.com:org/repo.git" }],
+      };
+      // Should not throw about files
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+  });
+});
+
+describe("validateForSync", () => {
+  test("throws when files is missing", () => {
+    const config: RawConfig = {
+      id: "settings-only",
+      settings: {
+        rulesets: {
+          "main-protection": { target: "branch" },
+        },
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.throws(
+      () => validateForSync(config),
+      /The 'sync' command requires a 'files' section/
+    );
+  });
+
+  test("throws when files is empty", () => {
+    const config: RawConfig = {
+      id: "empty-files",
+      files: {},
+      settings: {
+        rulesets: {
+          "main-protection": { target: "branch" },
+        },
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.throws(
+      () => validateForSync(config),
+      /The 'sync' command requires a 'files' section with at least one file/
+    );
+  });
+
+  test("passes when files has entries", () => {
+    const config: RawConfig = {
+      id: "has-files",
+      files: {
+        "config.json": { content: {} },
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.doesNotThrow(() => validateForSync(config));
+  });
+});
+
+describe("validateForSettings", () => {
+  test("throws when no settings anywhere", () => {
+    const config: RawConfig = {
+      id: "files-only",
+      files: {
+        "config.json": { content: {} },
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.throws(
+      () => validateForSettings(config),
+      /The 'settings' command requires a 'settings' section/
+    );
+  });
+
+  test("passes when settings at root level", () => {
+    const config: RawConfig = {
+      id: "root-settings",
+      files: {
+        "config.json": { content: {} },
+      },
+      settings: {
+        rulesets: {
+          "main-protection": { target: "branch" },
+        },
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.doesNotThrow(() => validateForSettings(config));
+  });
+
+  test("passes when settings only in repo", () => {
+    const config: RawConfig = {
+      id: "repo-settings",
+      files: {
+        "config.json": { content: {} },
+      },
+      repos: [
+        {
+          git: "git@github.com:org/repo.git",
+          settings: {
+            rulesets: {
+              "main-protection": { target: "branch" },
+            },
+          },
+        },
+      ],
+    };
+
+    assert.doesNotThrow(() => validateForSettings(config));
+  });
+
+  test("throws when settings exists but has no actionable config", () => {
+    const config: RawConfig = {
+      id: "empty-settings",
+      settings: {},
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.throws(
+      () => validateForSettings(config),
+      /No actionable settings configured/
+    );
+  });
+
+  test("throws when settings has empty rulesets", () => {
+    const config: RawConfig = {
+      id: "empty-rulesets",
+      settings: {
+        rulesets: {},
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+
+    assert.throws(
+      () => validateForSettings(config),
+      /No actionable settings configured/
+    );
+  });
+});
+
+describe("hasActionableSettings", () => {
+  test("returns false for undefined", () => {
+    assert.equal(hasActionableSettings(undefined), false);
+  });
+
+  test("returns false for empty object", () => {
+    assert.equal(hasActionableSettings({}), false);
+  });
+
+  test("returns false for empty rulesets", () => {
+    assert.equal(hasActionableSettings({ rulesets: {} }), false);
+  });
+
+  test("returns true when rulesets has entries", () => {
+    assert.equal(
+      hasActionableSettings({
+        rulesets: {
+          "main-protection": { target: "branch" },
+        },
+      }),
+      true
+    );
+  });
+
+  test("returns false for deleteOrphaned only", () => {
+    assert.equal(hasActionableSettings({ deleteOrphaned: true }), false);
   });
 });

@@ -4,7 +4,13 @@ import { program, Command } from "commander";
 import { resolve, join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { loadConfig, MergeMode, MergeStrategy } from "./config.js";
+import {
+  loadRawConfig,
+  normalizeConfig,
+  MergeMode,
+  MergeStrategy,
+} from "./config.js";
+import { validateForSync, validateForSettings } from "./config-validator.js";
 
 // Get version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -181,7 +187,17 @@ export async function runSync(
     console.log("Running in DRY RUN mode - no changes will be made\n");
   }
 
-  const config = loadConfig(configPath);
+  const rawConfig = loadRawConfig(configPath);
+
+  // Validate config is suitable for sync command
+  try {
+    validateForSync(rawConfig);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+
+  const config = normalizeConfig(rawConfig);
   const fileNames = getUniqueFileNames(config);
 
   let branchName: string;
@@ -302,7 +318,17 @@ export async function runSettings(
     console.log("Running in DRY RUN mode - no changes will be made\n");
   }
 
-  const config = loadConfig(configPath);
+  const rawConfig = loadRawConfig(configPath);
+
+  // Validate config is suitable for settings command
+  try {
+    validateForSettings(rawConfig);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+
+  const config = normalizeConfig(rawConfig);
 
   // Check if any repos have rulesets configured or have managed rulesets to clean up
   const reposWithRulesets = config.repos.filter(
@@ -457,9 +483,7 @@ export async function runSettings(
 
 program
   .name("xfg")
-  .description(
-    "Sync configuration files and manage GitHub Rulesets across repositories"
-  )
+  .description("Sync files and manage settings across repositories")
   .version(packageJson.version);
 
 // Sync command (file synchronization)

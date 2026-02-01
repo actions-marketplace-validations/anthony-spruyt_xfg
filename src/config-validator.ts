@@ -1,5 +1,5 @@
 import { extname, isAbsolute } from "node:path";
-import type { RawConfig } from "./config.js";
+import type { RawConfig, RawRepoSettings } from "./config.js";
 
 const VALID_STRATEGIES = ["replace", "append", "prepend"];
 
@@ -61,20 +61,27 @@ export function validateRawConfig(config: RawConfig): void {
     );
   }
 
-  if (!config.files || typeof config.files !== "object") {
-    throw new Error("Config missing required field: files (must be an object)");
+  // Validate at least one of files or settings exists
+  const hasFiles =
+    config.files &&
+    typeof config.files === "object" &&
+    Object.keys(config.files).length > 0;
+  const hasSettings = config.settings && typeof config.settings === "object";
+
+  if (!hasFiles && !hasSettings) {
+    throw new Error(
+      "Config requires at least one of: 'files' or 'settings'. " +
+        "Use 'files' to sync configuration files, or 'settings' to manage repository settings."
+    );
   }
 
-  const fileNames = Object.keys(config.files);
-  if (fileNames.length === 0) {
-    throw new Error("Config files object cannot be empty");
-  }
+  const fileNames = hasFiles ? Object.keys(config.files!) : [];
 
   // Validate each file definition
   for (const fileName of fileNames) {
     validateFileName(fileName);
 
-    const fileConfig = config.files[fileName];
+    const fileConfig = config.files![fileName];
     if (!fileConfig || typeof fileConfig !== "object") {
       throw new Error(`File '${fileName}' must have a configuration object`);
     }
@@ -239,7 +246,7 @@ export function validateRawConfig(config: RawConfig): void {
 
       for (const fileName of Object.keys(repo.files)) {
         // Ensure the file is defined at root level
-        if (!config.files[fileName]) {
+        if (!config.files || !config.files[fileName]) {
           throw new Error(
             `Repo at index ${i} references undefined file '${fileName}'. File must be defined in root 'files' object.`
           );
@@ -720,5 +727,83 @@ export function validateSettings(settings: unknown, context: string): void {
 
   if (s.deleteOrphaned !== undefined && typeof s.deleteOrphaned !== "boolean") {
     throw new Error(`${context}: settings.deleteOrphaned must be a boolean`);
+  }
+}
+
+// =============================================================================
+// Command-Specific Validators
+// =============================================================================
+
+/**
+ * Validates that config is suitable for the sync command.
+ * @throws Error if files section is missing or empty
+ */
+export function validateForSync(config: RawConfig): void {
+  if (!config.files) {
+    throw new Error(
+      "The 'sync' command requires a 'files' section with at least one file defined. " +
+        "To manage repository settings instead, use 'xfg settings'."
+    );
+  }
+
+  const fileNames = Object.keys(config.files);
+  if (fileNames.length === 0) {
+    throw new Error(
+      "The 'sync' command requires a 'files' section with at least one file defined. " +
+        "To manage repository settings instead, use 'xfg settings'."
+    );
+  }
+}
+
+/**
+ * Checks if settings contain actionable configuration.
+ * Currently only rulesets, but extensible for future settings features.
+ */
+export function hasActionableSettings(
+  settings: RawRepoSettings | undefined
+): boolean {
+  if (!settings) return false;
+
+  // Check for rulesets
+  if (settings.rulesets && Object.keys(settings.rulesets).length > 0) {
+    return true;
+  }
+
+  // Future: check for repoConfig, creation, etc.
+  // if (settings.repoConfig) return true;
+
+  return false;
+}
+
+/**
+ * Validates that config is suitable for the settings command.
+ * @throws Error if no settings are defined or no actionable settings exist
+ */
+export function validateForSettings(config: RawConfig): void {
+  // Check if settings exist at root or in any repo
+  const hasRootSettings = config.settings !== undefined;
+  const hasRepoSettings = config.repos.some(
+    (repo) => repo.settings !== undefined
+  );
+
+  if (!hasRootSettings && !hasRepoSettings) {
+    throw new Error(
+      "The 'settings' command requires a 'settings' section at root level or " +
+        "in at least one repo. To sync files instead, use 'xfg sync'."
+    );
+  }
+
+  // Check if there's at least one actionable setting
+  const rootActionable = hasActionableSettings(config.settings);
+  const repoActionable = config.repos.some((repo) =>
+    hasActionableSettings(repo.settings)
+  );
+
+  if (!rootActionable && !repoActionable) {
+    throw new Error(
+      "No actionable settings configured. Currently supported: rulesets. " +
+        "To sync files instead, use 'xfg sync'. " +
+        "See docs: https://anthony-spruyt.github.io/xfg/settings"
+    );
   }
 }

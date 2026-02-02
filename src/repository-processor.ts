@@ -14,6 +14,11 @@ import {
 } from "./repo-detector.js";
 import { interpolateXfgContent } from "./xfg-template.js";
 import { GitOps, GitOpsOptions } from "./git-ops.js";
+import {
+  AuthenticatedGitOps,
+  IAuthenticatedGitOps,
+  GitAuthOptions,
+} from "./authenticated-git-ops.js";
 import { createPR, mergePR, PRResult, FileAction } from "./pr-creator.js";
 import { logger, ILogger } from "./logger.js";
 import {
@@ -73,10 +78,13 @@ export interface ProcessorOptions {
 }
 
 /**
- * Factory function type for creating GitOps instances.
+ * Factory function type for creating IAuthenticatedGitOps instances.
  * Allows dependency injection for testing.
  */
-export type GitOpsFactory = (options: GitOpsOptions) => GitOps;
+export type GitOpsFactory = (
+  options: GitOpsOptions,
+  auth?: GitAuthOptions
+) => IAuthenticatedGitOps;
 
 export interface ProcessorResult {
   success: boolean;
@@ -93,7 +101,7 @@ export interface ProcessorResult {
 }
 
 export class RepositoryProcessor {
-  private gitOps: GitOps | null = null;
+  private gitOps: IAuthenticatedGitOps | null = null;
   private readonly gitOpsFactory: GitOpsFactory;
   private readonly log: ILogger;
   private retries: number = 3;
@@ -102,11 +110,13 @@ export class RepositoryProcessor {
 
   /**
    * Creates a new RepositoryProcessor.
-   * @param gitOpsFactory - Optional factory for creating GitOps instances (for testing)
+   * @param gitOpsFactory - Optional factory for creating AuthenticatedGitOps instances (for testing)
    * @param log - Optional logger instance (for testing)
    */
   constructor(gitOpsFactory?: GitOpsFactory, log?: ILogger) {
-    this.gitOpsFactory = gitOpsFactory ?? ((opts) => new GitOps(opts));
+    this.gitOpsFactory =
+      gitOpsFactory ??
+      ((opts, auth) => new AuthenticatedGitOps(new GitOps(opts), auth));
     this.log = log ?? logger;
 
     // Initialize GitHub App token manager if credentials are configured
@@ -141,11 +151,26 @@ export class RepositoryProcessor {
       };
     }
 
-    this.gitOps = this.gitOpsFactory({
-      workDir,
-      dryRun,
-      retries: this.retries,
-    });
+    // Build auth options if we have a token
+    const authOptions: GitAuthOptions | undefined = token
+      ? {
+          token,
+          host: isGitHubRepo(repoInfo)
+            ? (repoInfo as GitHubRepoInfo).host
+            : "github.com",
+          owner: repoInfo.owner,
+          repo: repoInfo.repo,
+        }
+      : undefined;
+
+    this.gitOps = this.gitOpsFactory(
+      {
+        workDir,
+        dryRun,
+        retries: this.retries,
+      },
+      authOptions
+    );
 
     // Determine merge mode early - affects workflow steps
     const mergeMode = repoConfig.prOptions?.merge ?? "auto";
@@ -473,6 +498,7 @@ export class RepositoryProcessor {
             // Use force push (--force-with-lease) for PR branches, not for direct mode
             force: !isDirectMode,
             token,
+            gitOps: this.gitOps!,
           });
           this.log.info(
             `Committed: ${commitResult.sha} (verified: ${commitResult.verified})`
@@ -632,11 +658,26 @@ export class RepositoryProcessor {
       };
     }
 
-    this.gitOps = this.gitOpsFactory({
-      workDir,
-      dryRun,
-      retries: this.retries,
-    });
+    // Build auth options if we have a token
+    const authOptions: GitAuthOptions | undefined = token
+      ? {
+          token,
+          host: isGitHubRepo(repoInfo)
+            ? (repoInfo as GitHubRepoInfo).host
+            : "github.com",
+          owner: repoInfo.owner,
+          repo: repoInfo.repo,
+        }
+      : undefined;
+
+    this.gitOps = this.gitOpsFactory(
+      {
+        workDir,
+        dryRun,
+        retries: this.retries,
+      },
+      authOptions
+    );
 
     const mergeMode = repoConfig.prOptions?.merge ?? "auto";
     const isDirectMode = mergeMode === "direct";
@@ -730,6 +771,7 @@ export class RepositoryProcessor {
           retries: this.retries,
           force: !isDirectMode,
           token,
+          gitOps: this.gitOps!,
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);

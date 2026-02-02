@@ -7,6 +7,10 @@ import { RepositoryProcessor, GitOpsFactory } from "./repository-processor.js";
 import { RepoConfig } from "./config.js";
 import { GitHubRepoInfo } from "./repo-detector.js";
 import { GitOps, GitOpsOptions } from "./git-ops.js";
+import {
+  AuthenticatedGitOps,
+  IAuthenticatedGitOps,
+} from "./authenticated-git-ops.js";
 import { ILogger } from "./logger.js";
 import { CommandExecutor } from "./command-executor.js";
 
@@ -233,6 +237,22 @@ describe("RepositoryProcessor", () => {
         // No-op for mock
       }
 
+      // AuthenticatedGitOps methods (stubs for testing)
+      async lsRemote(_branchName: string): Promise<string> {
+        return "";
+      }
+
+      async pushRefspec(
+        _refspec: string,
+        _options?: { delete?: boolean }
+      ): Promise<void> {
+        // No-op for mock
+      }
+
+      async fetchBranch(_branchName: string): Promise<void> {
+        // No-op for mock
+      }
+
       private getWorkDir(): string {
         return (this as unknown as { workDir: string }).workDir;
       }
@@ -258,10 +278,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOps | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOps(opts);
         mockGitOps.setupFileExists(true, true); // File exists with same content
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -283,10 +303,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOps | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOps(opts);
         mockGitOps.setupFileExists(true, false); // File exists with different content
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -313,10 +333,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOps | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOps(opts);
         mockGitOps.setupFileExists(false, false); // File doesn't exist
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -355,10 +375,10 @@ describe("RepositoryProcessor", () => {
         }
       }
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         const mockGitOps = new MockGitOpsNoStagedChanges(opts);
         mockGitOps.setupFileExists(false, false); // File doesn't exist, so it will try to create
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -475,10 +495,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsWithExecutable | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsWithExecutable(opts);
         mockGitOps.setupFileExists(false, false);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -504,10 +524,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsWithExecutable | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsWithExecutable(opts);
         mockGitOps.setupFileExists(false, false);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -533,10 +553,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsWithExecutable | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsWithExecutable(opts);
         mockGitOps.setupFileExists(false, false);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -564,10 +584,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsWithExecutable | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsWithExecutable(opts);
         mockGitOps.setupFileExists(false, false);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -770,9 +790,9 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDirectMode | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDirectMode(opts);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -802,8 +822,8 @@ describe("RepositoryProcessor", () => {
     test("direct mode should push to default branch", async () => {
       const mockLogger = createMockLogger();
 
-      const mockFactory: GitOpsFactory = (opts) => {
-        return new MockGitOpsForDirectMode(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
+        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -840,8 +860,8 @@ describe("RepositoryProcessor", () => {
     test("direct mode should return helpful error on branch protection", async () => {
       const mockLogger = createMockLogger();
 
-      const mockFactory: GitOpsFactory = (opts) => {
-        return new MockGitOpsForDirectMode(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
+        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -896,9 +916,9 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDirectMode | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDirectMode(opts);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -930,8 +950,8 @@ describe("RepositoryProcessor", () => {
     test("direct mode should use force: false for push (issue #183)", async () => {
       const mockLogger = createMockLogger();
 
-      const mockFactory: GitOpsFactory = (opts) => {
-        return new MockGitOpsForDirectMode(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
+        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -962,8 +982,8 @@ describe("RepositoryProcessor", () => {
     test("PR mode should use force: true for push (issue #183)", async () => {
       const mockLogger = createMockLogger();
 
-      const mockFactory: GitOpsFactory = (opts) => {
-        return new MockGitOpsForDirectMode(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
+        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -993,7 +1013,7 @@ describe("RepositoryProcessor", () => {
   });
 
   describe("PR creation with executor", () => {
-    class MockGitOpsForPR extends GitOps {
+    class MockGitOpsForPR extends GitOps implements IAuthenticatedGitOps {
       override cleanWorkspace(): void {
         mkdirSync(this.getWorkDir(), { recursive: true });
       }
@@ -1019,6 +1039,16 @@ describe("RepositoryProcessor", () => {
       override async push(): Promise<void> {}
       override async fetch(): Promise<void> {}
 
+      // IAuthenticatedGitOps methods
+      async lsRemote(_branchName: string): Promise<string> {
+        return "";
+      }
+      async pushRefspec(
+        _refspec: string,
+        _options?: { delete?: boolean }
+      ): Promise<void> {}
+      async fetchBranch(_branchName: string): Promise<void> {}
+
       private getWorkDir(): string {
         return (this as unknown as { workDir: string }).workDir;
       }
@@ -1034,7 +1064,8 @@ describe("RepositoryProcessor", () => {
         diffSummary() {},
       };
 
-      const mockFactory: GitOpsFactory = (opts) => new MockGitOpsForPR(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) =>
+        new MockGitOpsForPR(opts);
 
       const mockExecutor = {
         async exec(): Promise<string> {
@@ -1146,10 +1177,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForCreateOnly | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForCreateOnly(opts);
         mockGitOps.fileExistsOnBaseBranch = true;
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1186,10 +1217,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForCreateOnly | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForCreateOnly(opts);
         mockGitOps.fileExistsOnBaseBranch = false;
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1242,11 +1273,11 @@ describe("RepositoryProcessor", () => {
 
       let mockGitOps: MockGitOpsForCreateOnlyDeletion | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForCreateOnlyDeletion(opts);
         mockGitOps.fileExistsOnBaseBranch = true; // File exists on base branch
         mockGitOps.setupExistingLocalFile("config.json"); // File exists locally too
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1381,9 +1412,9 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForTemplate | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForTemplate(opts);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1424,9 +1455,9 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForTemplate | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForTemplate(opts);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1540,8 +1571,8 @@ describe("RepositoryProcessor", () => {
     test("should format commit message for 2-3 files with file names", async () => {
       const mockLogger = createMockLogger();
 
-      const mockFactory: GitOpsFactory = (opts) => {
-        return new MockGitOpsForCommit(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
+        return new AuthenticatedGitOps(new MockGitOpsForCommit(opts));
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1583,7 +1614,7 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForCommit | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForCommit(opts);
         // Override to return 4 files
         mockGitOps.getChangedFiles = async () => [
@@ -1592,7 +1623,7 @@ describe("RepositoryProcessor", () => {
           "config3.json",
           "config4.json",
         ];
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1682,10 +1713,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsWithCleanupError | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsWithCleanupError(opts);
         mockGitOps.shouldFailCleanup = true;
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1822,11 +1853,11 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDeletion | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDeletion(opts);
         // Simulate orphaned.json exists in the repo (from previous sync)
         mockGitOps.setupExistingFile("orphaned.json");
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1873,10 +1904,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDeletion | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDeletion(opts);
         mockGitOps.setupExistingFile("orphaned.json");
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1922,10 +1953,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDeletion | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDeletion(opts);
         mockGitOps.setupExistingFile("orphaned.json");
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -1980,10 +2011,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDeletion | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDeletion(opts);
         mockGitOps.setupExistingFile("orphaned.json");
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -2119,10 +2150,10 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForFileCount | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForFileCount(opts);
         // wouldChange defaults to true, so both config.json and .xfg.json will be tracked
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -2170,12 +2201,12 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForFileCount | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForFileCount(opts);
         // config1.json would change, config2.json would not
         mockGitOps.wouldChangeOverride.set("config1.json", true);
         mockGitOps.wouldChangeOverride.set("config2.json", false);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -2220,7 +2251,7 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForFileCount | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForFileCount(opts);
         // Override to make skipped.json exist on base branch (triggers createOnly skip)
         mockGitOps.fileExistsOnBranchOverride = true;
@@ -2228,7 +2259,7 @@ describe("RepositoryProcessor", () => {
         mockGitOps.fileExistsOnBranch = async (fileName: string) => {
           return fileName === "skipped.json";
         };
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -2281,7 +2312,7 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForFileCount | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForFileCount(opts);
         // Simulate manifest already exists (will be updated, not created)
         mockGitOps.fileExistsOnBranchOverride = false;
@@ -2289,7 +2320,7 @@ describe("RepositoryProcessor", () => {
           // .xfg.json exists (manifest), .xfg-test is new
           return fileName === ".xfg.json";
         };
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -2384,14 +2415,14 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForFileCount | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForFileCount(opts);
         // Both config files exist on base branch (they're being updated)
         mockGitOps.fileExistsOnBranchOverride = false;
         mockGitOps.fileExistsOnBranch = async (fileName: string) => {
           return fileName === "action-test.json"; // Only action-test.json exists
         };
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -2501,7 +2532,10 @@ describe("RepositoryProcessor", () => {
       },
     });
 
-    class MockGitOpsForCommitStrategy extends GitOps {
+    class MockGitOpsForCommitStrategy
+      extends GitOps
+      implements IAuthenticatedGitOps
+    {
       constructor(options: GitOpsOptions) {
         super(options);
       }
@@ -2551,6 +2585,22 @@ describe("RepositoryProcessor", () => {
         // No-op for mock
       }
 
+      // IAuthenticatedGitOps methods
+      async lsRemote(_branchName: string): Promise<string> {
+        return "";
+      }
+
+      async pushRefspec(
+        _refspec: string,
+        _options?: { delete?: boolean }
+      ): Promise<void> {
+        // No-op for mock
+      }
+
+      async fetchBranch(_branchName: string): Promise<void> {
+        // No-op for mock
+      }
+
       private getWorkDir(): string {
         return (this as unknown as { workDir: string }).workDir;
       }
@@ -2569,9 +2619,9 @@ describe("RepositoryProcessor", () => {
         const mockLogger = createMockLogger();
         let mockGitOps: MockGitOpsForCommitStrategy | null = null;
 
-        const mockFactory: GitOpsFactory = (opts) => {
+        const mockFactory: GitOpsFactory = (opts, _auth) => {
           mockGitOps = new MockGitOpsForCommitStrategy(opts);
-          // wouldChange will return true since we write new content
+          // Return mock directly - it implements IAuthenticatedGitOps
           return mockGitOps;
         };
 
@@ -2676,9 +2726,9 @@ describe("RepositoryProcessor", () => {
         const mockLogger = createMockLogger();
         let mockGitOps: MockGitOpsForCommitStrategy | null = null;
 
-        const mockFactory: GitOpsFactory = (opts) => {
+        const mockFactory: GitOpsFactory = (opts, _auth) => {
           mockGitOps = new MockGitOpsForCommitStrategy(opts);
-          // wouldChange will return true since we write new content
+          // Return mock directly - it implements IAuthenticatedGitOps
           return mockGitOps;
         };
 
@@ -2750,9 +2800,8 @@ describe("RepositoryProcessor", () => {
 
         const mockLogger = createMockLogger();
 
-        const mockFactory: GitOpsFactory = (opts) => {
-          const gitOps = new MockGitOpsForCommitStrategy(opts);
-          return gitOps;
+        const mockFactory: GitOpsFactory = (opts, _auth) => {
+          return new MockGitOpsForCommitStrategy(opts);
         };
 
         // Test uses mock executor to simulate protected branch error
@@ -2817,9 +2866,8 @@ describe("RepositoryProcessor", () => {
 
         const mockLogger = createMockLogger();
 
-        const mockFactory: GitOpsFactory = (opts) => {
-          const gitOps = new MockGitOpsForCommitStrategy(opts);
-          return gitOps;
+        const mockFactory: GitOpsFactory = (opts, _auth) => {
+          return new MockGitOpsForCommitStrategy(opts);
         };
 
         // Test uses mock executor to simulate permission denied error
@@ -2884,9 +2932,8 @@ describe("RepositoryProcessor", () => {
 
         const mockLogger = createMockLogger();
 
-        const mockFactory: GitOpsFactory = (opts) => {
-          const gitOps = new MockGitOpsForCommitStrategy(opts);
-          return gitOps;
+        const mockFactory: GitOpsFactory = (opts, _auth) => {
+          return new MockGitOpsForCommitStrategy(opts);
         };
 
         // Test uses mock executor to simulate network error
@@ -3040,13 +3087,13 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDiffStats | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDiffStats(opts);
         // existing.json exists (update), new-file.json doesn't (create)
         // wouldChange will return true since content changes
         mockGitOps.setupFileExists("existing.json", true);
         mockGitOps.setupFileExists("new-file.json", false);
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -3091,12 +3138,12 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
       let mockGitOps: MockGitOpsForDiffStats | null = null;
 
-      const mockFactory: GitOpsFactory = (opts) => {
+      const mockFactory: GitOpsFactory = (opts, _auth) => {
         mockGitOps = new MockGitOpsForDiffStats(opts);
         // Git reports config.json changed, orphaned.json will be deleted
         // wouldChange will return true since we write new content
         mockGitOps.setupFileExists("orphaned.json", true); // Orphan exists
-        return mockGitOps;
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -3194,10 +3241,10 @@ describe("RepositoryProcessor", () => {
       };
 
       // Create a minimal mock GitOps that simulates a working repository
-      const mockGitOpsFactory: GitOpsFactory = (opts) => {
+      const mockGitOpsFactory: GitOpsFactory = (opts, _auth) => {
         const gitOps = new GitOps(opts);
         // Override methods for testing using Object.assign to avoid 'any' type
-        return Object.assign(gitOps, {
+        const mockGitOps = Object.assign(gitOps, {
           cleanWorkspace: () => {
             mkdirSync(opts.workDir, { recursive: true });
           },
@@ -3215,6 +3262,7 @@ describe("RepositoryProcessor", () => {
           setExecutable: async () => {},
           fileExists: () => false,
         });
+        return new AuthenticatedGitOps(mockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockGitOpsFactory, mockLogger);
@@ -3307,9 +3355,9 @@ describe("RepositoryProcessor", () => {
       };
 
       try {
-        const mockGitOpsFactory: GitOpsFactory = (opts) => {
+        const mockGitOpsFactory: GitOpsFactory = (opts, _auth) => {
           const gitOps = new GitOps(opts);
-          return Object.assign(gitOps, {
+          const mockGitOps = Object.assign(gitOps, {
             cleanWorkspace: () => {
               mkdirSync(opts.workDir, { recursive: true });
             },
@@ -3327,6 +3375,7 @@ describe("RepositoryProcessor", () => {
             setExecutable: async () => {},
             fileExists: () => false,
           });
+          return new AuthenticatedGitOps(mockGitOps);
         };
 
         const processor = new RepositoryProcessor(
@@ -3389,9 +3438,9 @@ describe("RepositoryProcessor", () => {
       };
 
       try {
-        const mockGitOpsFactory: GitOpsFactory = (opts) => {
+        const mockGitOpsFactory: GitOpsFactory = (opts, _auth) => {
           const gitOps = new GitOps(opts);
-          return Object.assign(gitOps, {
+          const mockGitOps = Object.assign(gitOps, {
             cleanWorkspace: () => {
               mkdirSync(opts.workDir, { recursive: true });
             },
@@ -3409,6 +3458,7 @@ describe("RepositoryProcessor", () => {
             setExecutable: async () => {},
             fileExists: () => false,
           });
+          return new AuthenticatedGitOps(mockGitOps);
         };
 
         const processor = new RepositoryProcessor(
@@ -3455,6 +3505,194 @@ describe("RepositoryProcessor", () => {
         globalThis.fetch = originalFetch;
       }
     });
+
+    test("passes auth options to factory when GitHub App token is obtained", async () => {
+      const { TEST_PRIVATE_KEY, TEST_APP_ID } =
+        await import("../fixtures/test-fixtures.js");
+
+      // Set GitHub App credentials to enable tokenManager creation
+      process.env.XFG_GITHUB_APP_ID = TEST_APP_ID;
+      process.env.XFG_GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+
+      const mockLogger = {
+        messages: [] as string[],
+        info(message: string) {
+          this.messages.push(message);
+        },
+        fileDiff() {},
+        diffSummary() {},
+      };
+
+      // Track the auth options passed to factory
+      let capturedAuth: unknown = undefined;
+
+      const mockGitOpsFactory: GitOpsFactory = (opts, auth) => {
+        capturedAuth = auth;
+        const gitOps = new GitOps(opts);
+        const mockGitOps = Object.assign(gitOps, {
+          cleanWorkspace: () => {
+            mkdirSync(opts.workDir, { recursive: true });
+          },
+          clone: async () => {},
+          getDefaultBranch: async () => ({
+            branch: "main",
+            method: "remote" as const,
+          }),
+          createBranch: async () => {},
+          fileExistsOnBranch: async () => false,
+          writeFile: () => {},
+          getFileContent: () => null,
+          wouldChange: () => true,
+          hasStagedChanges: async () => false, // Skip actual commit
+          setExecutable: async () => {},
+          fileExists: () => false,
+        });
+        return new AuthenticatedGitOps(mockGitOps);
+      };
+
+      const processor = new RepositoryProcessor(mockGitOpsFactory, mockLogger);
+
+      // Replace the tokenManager with a mock that returns a token directly
+      // This bypasses the complex JWT/fetch flow while still testing auth options building
+      const mockTokenManager = {
+        async getTokenForRepo() {
+          return "ghs_test_installation_token_abc123";
+        },
+      };
+      (
+        processor as unknown as { tokenManager: typeof mockTokenManager }
+      ).tokenManager = mockTokenManager;
+
+      await processor.process(
+        {
+          git: "git@github.com:test-owner/repo.git",
+          files: [{ fileName: "test.json", content: { key: "value" } }],
+        },
+        {
+          type: "github",
+          gitUrl: "git@github.com:test-owner/repo.git",
+          owner: "test-owner",
+          repo: "repo",
+          host: "github.com",
+        },
+        {
+          branchName: "chore/sync-config",
+          workDir: join(testDir, "auth-test"),
+          configId: "test-config",
+          dryRun: false,
+          executor: createMockExecutor(),
+        }
+      );
+
+      // Verify auth options were passed
+      assert.ok(capturedAuth, "Auth options should be passed to factory");
+      const auth = capturedAuth as {
+        token: string;
+        host: string;
+        owner: string;
+        repo: string;
+      };
+      assert.equal(
+        auth.token,
+        "ghs_test_installation_token_abc123",
+        "Token should match"
+      );
+      assert.equal(auth.host, "github.com", "Host should be github.com");
+      assert.equal(auth.owner, "test-owner", "Owner should match");
+      assert.equal(auth.repo, "repo", "Repo should match");
+    });
+
+    test("passes auth options with custom host for GitHub Enterprise", async () => {
+      const { TEST_PRIVATE_KEY, TEST_APP_ID } =
+        await import("../fixtures/test-fixtures.js");
+
+      // Set GitHub App credentials to enable tokenManager creation
+      process.env.XFG_GITHUB_APP_ID = TEST_APP_ID;
+      process.env.XFG_GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+
+      const mockLogger = {
+        messages: [] as string[],
+        info(message: string) {
+          this.messages.push(message);
+        },
+        fileDiff() {},
+        diffSummary() {},
+      };
+
+      // Track the auth options passed to factory
+      let capturedAuth: unknown = undefined;
+
+      const mockGitOpsFactory: GitOpsFactory = (opts, auth) => {
+        capturedAuth = auth;
+        const gitOps = new GitOps(opts);
+        const mockGitOps = Object.assign(gitOps, {
+          cleanWorkspace: () => {
+            mkdirSync(opts.workDir, { recursive: true });
+          },
+          clone: async () => {},
+          getDefaultBranch: async () => ({
+            branch: "main",
+            method: "remote" as const,
+          }),
+          createBranch: async () => {},
+          fileExistsOnBranch: async () => false,
+          writeFile: () => {},
+          getFileContent: () => null,
+          wouldChange: () => true,
+          hasStagedChanges: async () => false,
+          setExecutable: async () => {},
+          fileExists: () => false,
+        });
+        return new AuthenticatedGitOps(mockGitOps);
+      };
+
+      const processor = new RepositoryProcessor(mockGitOpsFactory, mockLogger);
+
+      // Replace the tokenManager with a mock that returns a token directly
+      const mockTokenManager = {
+        async getTokenForRepo() {
+          return "ghs_enterprise_token_xyz789";
+        },
+      };
+      (
+        processor as unknown as { tokenManager: typeof mockTokenManager }
+      ).tokenManager = mockTokenManager;
+
+      await processor.process(
+        {
+          git: "git@github.mycompany.com:enterprise-owner/repo.git",
+          files: [{ fileName: "test.json", content: { key: "value" } }],
+        },
+        {
+          type: "github",
+          gitUrl: "git@github.mycompany.com:enterprise-owner/repo.git",
+          owner: "enterprise-owner",
+          repo: "repo",
+          host: "github.mycompany.com",
+        },
+        {
+          branchName: "chore/sync-config",
+          workDir: join(testDir, "auth-enterprise-test"),
+          configId: "test-config",
+          dryRun: false,
+          executor: createMockExecutor(),
+        }
+      );
+
+      // Verify auth options have custom host
+      assert.ok(capturedAuth, "Auth options should be passed to factory");
+      const auth = capturedAuth as {
+        token: string;
+        host: string;
+        owner: string;
+        repo: string;
+      };
+      assert.equal(
+        auth.host,
+        "github.mycompany.com",
+        "Host should be the custom enterprise host"
+      );
+    });
   });
 
   describe("updateManifestOnly", () => {
@@ -3477,7 +3715,7 @@ describe("RepositoryProcessor", () => {
     });
 
     // Mock GitOps for updateManifestOnly tests
-    class MockGitOps extends GitOps {
+    class MockGitOps extends GitOps implements IAuthenticatedGitOps {
       constructor(options: GitOpsOptions) {
         super(options);
       }
@@ -3518,11 +3756,21 @@ describe("RepositoryProcessor", () => {
       override wouldChange(_fileName: string, _content: string): boolean {
         return true;
       }
+
+      // IAuthenticatedGitOps methods
+      async lsRemote(_branchName: string): Promise<string> {
+        return "";
+      }
+      async pushRefspec(
+        _refspec: string,
+        _options?: { delete?: boolean }
+      ): Promise<void> {}
+      async fetchBranch(_branchName: string): Promise<void> {}
     }
 
     test("updates manifest with rulesets and commits", async () => {
       const mockLogger = createMockLogger();
-      const mockFactory: GitOpsFactory = (opts) => new MockGitOps(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => new MockGitOps(opts);
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
 
       const repoInfo: GitHubRepoInfo = {
@@ -3561,7 +3809,7 @@ describe("RepositoryProcessor", () => {
 
     test("dry-run mode does not commit changes", async () => {
       const mockLogger = createMockLogger();
-      const mockFactory: GitOpsFactory = (opts) => new MockGitOps(opts);
+      const mockFactory: GitOpsFactory = (opts, _auth) => new MockGitOps(opts);
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
 
       const repoInfo: GitHubRepoInfo = {
@@ -3648,7 +3896,7 @@ describe("RepositoryProcessor", () => {
         ) + "\n"
       );
 
-      const mockFactory: GitOpsFactory = (opts) =>
+      const mockFactory: GitOpsFactory = (opts, _auth) =>
         new MockGitOpsWithManifest(opts);
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
 

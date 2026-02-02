@@ -821,14 +821,15 @@ describe("RepositoryProcessor", () => {
 
     test("direct mode should push to default branch", async () => {
       const mockLogger = createMockLogger();
+      let capturedMockGitOps: MockGitOpsForDirectMode | undefined;
 
       const mockFactory: GitOpsFactory = (opts, _auth) => {
-        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
+        capturedMockGitOps = new MockGitOpsForDirectMode(opts);
+        return new AuthenticatedGitOps(capturedMockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
       const localWorkDir = join(testDir, `direct-mode-push-${Date.now()}`);
-      const trackingExecutor = createTrackingMockExecutor();
 
       const repoConfig: RepoConfig = {
         git: "git@github.com:test/repo.git",
@@ -841,11 +842,11 @@ describe("RepositoryProcessor", () => {
         workDir: localWorkDir,
         configId: "test-config",
         dryRun: false,
-        executor: trackingExecutor,
+        executor: createMockExecutor(),
       });
 
       assert.equal(
-        trackingExecutor.pushBranch,
+        capturedMockGitOps!.pushBranch,
         "main",
         "Should push to default branch (main)"
       );
@@ -861,7 +862,9 @@ describe("RepositoryProcessor", () => {
       const mockLogger = createMockLogger();
 
       const mockFactory: GitOpsFactory = (opts, _auth) => {
-        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
+        const mock = new MockGitOpsForDirectMode(opts);
+        mock.shouldRejectPush = true; // Enable push rejection
+        return new AuthenticatedGitOps(mock);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
@@ -869,19 +872,6 @@ describe("RepositoryProcessor", () => {
         testDir,
         `direct-mode-protection-${Date.now()}`
       );
-
-      // Create executor that rejects push commands
-      const rejectingExecutor: CommandExecutor = {
-        async exec(command: string): Promise<string> {
-          if (command.includes("git push")) {
-            throw new Error("Push rejected (branch protection)");
-          }
-          if (command.includes("git rev-parse HEAD")) {
-            return "abc123";
-          }
-          return "";
-        },
-      };
 
       const repoConfig: RepoConfig = {
         git: "git@github.com:test/repo.git",
@@ -894,7 +884,7 @@ describe("RepositoryProcessor", () => {
         workDir: localWorkDir,
         configId: "test-config",
         dryRun: false,
-        executor: rejectingExecutor,
+        executor: createMockExecutor(),
       });
 
       assert.equal(result.success, false, "Should fail");
@@ -949,14 +939,15 @@ describe("RepositoryProcessor", () => {
 
     test("direct mode should use force: false for push (issue #183)", async () => {
       const mockLogger = createMockLogger();
+      let capturedMockGitOps: MockGitOpsForDirectMode | undefined;
 
       const mockFactory: GitOpsFactory = (opts, _auth) => {
-        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
+        capturedMockGitOps = new MockGitOpsForDirectMode(opts);
+        return new AuthenticatedGitOps(capturedMockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
       const localWorkDir = join(testDir, `direct-mode-force-${Date.now()}`);
-      const trackingExecutor = createTrackingMockExecutor();
 
       const repoConfig: RepoConfig = {
         git: "git@github.com:test/repo.git",
@@ -969,11 +960,11 @@ describe("RepositoryProcessor", () => {
         workDir: localWorkDir,
         configId: "test-config",
         dryRun: false,
-        executor: trackingExecutor,
+        executor: createMockExecutor(),
       });
 
       assert.equal(
-        trackingExecutor.pushForce,
+        capturedMockGitOps!.pushForce,
         false,
         "Direct mode should use force: false (never force push to default branch)"
       );
@@ -981,14 +972,15 @@ describe("RepositoryProcessor", () => {
 
     test("PR mode should use force: true for push (issue #183)", async () => {
       const mockLogger = createMockLogger();
+      let capturedMockGitOps: MockGitOpsForDirectMode | undefined;
 
       const mockFactory: GitOpsFactory = (opts, _auth) => {
-        return new AuthenticatedGitOps(new MockGitOpsForDirectMode(opts));
+        capturedMockGitOps = new MockGitOpsForDirectMode(opts);
+        return new AuthenticatedGitOps(capturedMockGitOps);
       };
 
       const processor = new RepositoryProcessor(mockFactory, mockLogger);
       const localWorkDir = join(testDir, `pr-mode-force-${Date.now()}`);
-      const trackingExecutor = createTrackingMockExecutor();
 
       const repoConfig: RepoConfig = {
         git: "git@github.com:test/repo.git",
@@ -1001,11 +993,11 @@ describe("RepositoryProcessor", () => {
         workDir: localWorkDir,
         configId: "test-config",
         dryRun: false,
-        executor: trackingExecutor,
+        executor: createMockExecutor(),
       });
 
       assert.equal(
-        trackingExecutor.pushForce,
+        capturedMockGitOps!.pushForce,
         true,
         "PR mode should use force: true (--force-with-lease for sync branch)"
       );
@@ -3693,6 +3685,106 @@ describe("RepositoryProcessor", () => {
         "Host should be the custom enterprise host"
       );
     });
+
+    test("uses GH_TOKEN for git auth when no GitHub App token", async () => {
+      // Set up GH_TOKEN in environment (no GitHub App credentials)
+      const originalGhToken = process.env.GH_TOKEN;
+      process.env.GH_TOKEN = "ghp_test_pat_token";
+
+      try {
+        const mockLogger = {
+          messages: [] as string[],
+          info(message: string) {
+            this.messages.push(message);
+          },
+          fileDiff() {},
+          diffSummary() {},
+        };
+
+        // Track the auth options passed to factory
+        let capturedAuth: unknown = undefined;
+
+        const mockGitOpsFactory: GitOpsFactory = (opts, auth) => {
+          capturedAuth = auth;
+          const gitOps = new GitOps(opts);
+          const mockGitOps = Object.assign(gitOps, {
+            cleanWorkspace: () => {
+              mkdirSync(opts.workDir, { recursive: true });
+            },
+            clone: async () => {},
+            getDefaultBranch: async () => ({
+              branch: "main",
+              method: "remote" as const,
+            }),
+            createBranch: async () => {},
+            fileExistsOnBranch: async () => false,
+            writeFile: () => {},
+            getFileContent: () => null,
+            wouldChange: () => true,
+            hasStagedChanges: async () => false, // Skip actual commit
+            setExecutable: async () => {},
+            fileExists: () => false,
+          });
+          return new AuthenticatedGitOps(mockGitOps);
+        };
+
+        const processor = new RepositoryProcessor(
+          mockGitOpsFactory,
+          mockLogger
+        );
+
+        await processor.process(
+          {
+            git: "git@github.com:test-owner/repo.git",
+            files: [{ fileName: "test.json", content: { key: "value" } }],
+          },
+          {
+            type: "github",
+            gitUrl: "git@github.com:test-owner/repo.git",
+            owner: "test-owner",
+            repo: "repo",
+            host: "github.com",
+          },
+          {
+            branchName: "chore/sync-config",
+            workDir: join(testDir, "gh-token-test"),
+            configId: "test-config",
+            dryRun: false,
+            executor: createMockExecutor(),
+          }
+        );
+
+        // Verify gitOpsFactory was called with auth options containing GH_TOKEN
+        assert.ok(
+          capturedAuth,
+          "authOptions should be defined when GH_TOKEN is set"
+        );
+        const auth = capturedAuth as {
+          token: string;
+          host: string;
+          owner: string;
+          repo: string;
+        };
+        assert.strictEqual(
+          auth.token,
+          "ghp_test_pat_token",
+          "Should use GH_TOKEN"
+        );
+        assert.strictEqual(
+          auth.host,
+          "github.com",
+          "Host should be github.com"
+        );
+        assert.strictEqual(auth.owner, "test-owner", "Owner should match");
+        assert.strictEqual(auth.repo, "repo", "Repo should match");
+      } finally {
+        if (originalGhToken) {
+          process.env.GH_TOKEN = originalGhToken;
+        } else {
+          delete process.env.GH_TOKEN;
+        }
+      }
+    });
   });
 
   describe("updateManifestOnly", () => {
@@ -3755,6 +3847,13 @@ describe("RepositoryProcessor", () => {
 
       override wouldChange(_fileName: string, _content: string): boolean {
         return true;
+      }
+
+      override async push(
+        _branchName: string,
+        _options?: { force?: boolean }
+      ): Promise<void> {
+        // No-op for mock
       }
 
       // IAuthenticatedGitOps methods
@@ -3935,6 +4034,76 @@ describe("RepositoryProcessor", () => {
       assert.equal(result.success, true);
       assert.equal(result.skipped, true);
       assert.equal(result.message, "No manifest changes detected");
+    });
+
+    test("uses GH_TOKEN for git auth when no GitHub App token", async () => {
+      const originalGhToken = process.env.GH_TOKEN;
+      process.env.GH_TOKEN = "ghp_test_pat_token";
+
+      try {
+        const mockLogger = createMockLogger();
+
+        // Track the auth options passed to factory
+        let capturedAuth: unknown = undefined;
+
+        const mockGitOpsFactory: GitOpsFactory = (opts, auth) => {
+          capturedAuth = auth;
+          return new MockGitOps(opts);
+        };
+
+        const processor = new RepositoryProcessor(
+          mockGitOpsFactory,
+          mockLogger
+        );
+
+        const repoInfo: GitHubRepoInfo = {
+          type: "github",
+          owner: "test-owner",
+          repo: "test-repo",
+          host: "github.com",
+          gitUrl: "git@github.com:test-owner/test-repo.git",
+        };
+
+        const repoConfig: RepoConfig = {
+          git: "git@github.com:test-owner/test-repo.git",
+          files: [],
+          prOptions: { merge: "direct" },
+        };
+
+        const options = {
+          branchName: "chore/sync-config",
+          workDir: join(testDir, `manifest-gh-token-${Date.now()}`),
+          configId: "test-config",
+          dryRun: false,
+          executor: createMockExecutor(),
+        };
+
+        await processor.updateManifestOnly(repoInfo, repoConfig, options, {
+          rulesets: ["test-ruleset"],
+        });
+
+        // Verify auth options were passed with GH_TOKEN
+        assert.ok(
+          capturedAuth,
+          "authOptions should be defined when GH_TOKEN is set"
+        );
+        const auth = capturedAuth as {
+          token: string;
+          host: string;
+          owner: string;
+          repo: string;
+        };
+        assert.strictEqual(auth.token, "ghp_test_pat_token");
+        assert.strictEqual(auth.host, "github.com");
+        assert.strictEqual(auth.owner, "test-owner");
+        assert.strictEqual(auth.repo, "test-repo");
+      } finally {
+        if (originalGhToken) {
+          process.env.GH_TOKEN = originalGhToken;
+        } else {
+          delete process.env.GH_TOKEN;
+        }
+      }
     });
   });
 });

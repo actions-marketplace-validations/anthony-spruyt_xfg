@@ -27,7 +27,7 @@ import {
   hasGitHubAppCredentials,
 } from "./strategies/index.js";
 import type { PRMergeConfig, FileChange } from "./strategies/index.js";
-import { CommandExecutor, defaultExecutor } from "./command-executor.js";
+import { ICommandExecutor, defaultExecutor } from "./command-executor.js";
 import {
   getFileStatus,
   generateDiff,
@@ -43,6 +43,20 @@ import {
   MANIFEST_FILENAME,
 } from "./manifest.js";
 import { GitHubAppTokenManager } from "./github-app-token-manager.js";
+
+export interface IRepositoryProcessor {
+  process(
+    repoConfig: RepoConfig,
+    repoInfo: RepoInfo,
+    options: ProcessorOptions
+  ): Promise<ProcessorResult>;
+  updateManifestOnly(
+    repoInfo: RepoInfo,
+    repoConfig: RepoConfig,
+    options: ProcessorOptions,
+    manifestUpdate: { rulesets: string[] }
+  ): Promise<ProcessorResult>;
+}
 
 /**
  * Determines if a file should be marked as executable.
@@ -70,7 +84,7 @@ export interface ProcessorOptions {
   /** Number of retries for network operations (default: 3) */
   retries?: number;
   /** Command executor for shell commands (for testing) */
-  executor?: CommandExecutor;
+  executor?: ICommandExecutor;
   /** Custom PR body template */
   prTemplate?: string;
   /** Skip deleting orphaned files even if deleteOrphaned is configured */
@@ -100,12 +114,12 @@ export interface ProcessorResult {
   diffStats?: DiffStats;
 }
 
-export class RepositoryProcessor {
+export class RepositoryProcessor implements IRepositoryProcessor {
   private gitOps: IAuthenticatedGitOps | null = null;
   private readonly gitOpsFactory: GitOpsFactory;
   private readonly log: ILogger;
   private retries: number = 3;
-  private executor: CommandExecutor = defaultExecutor;
+  private executor: ICommandExecutor = defaultExecutor;
   private readonly tokenManager: GitHubAppTokenManager | null;
 
   /**

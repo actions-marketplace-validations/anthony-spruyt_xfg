@@ -1,9 +1,9 @@
 import {
-  CommitStrategy,
+  ICommitStrategy,
   CommitOptions,
   CommitResult,
 } from "./commit-strategy.js";
-import { CommandExecutor, defaultExecutor } from "../command-executor.js";
+import { ICommandExecutor, defaultExecutor } from "../command-executor.js";
 import { isGitHubRepo, GitHubRepoInfo } from "../repo-detector.js";
 import { escapeShellArg } from "../shell-utils.js";
 import { IAuthenticatedGitOps } from "../authenticated-git-ops.js";
@@ -48,10 +48,10 @@ export function validateBranchName(branchName: string): void {
  *
  * This strategy is GitHub-only and requires the `gh` CLI to be authenticated.
  */
-export class GraphQLCommitStrategy implements CommitStrategy {
-  private executor: CommandExecutor;
+export class GraphQLCommitStrategy implements ICommitStrategy {
+  private executor: ICommandExecutor;
 
-  constructor(executor?: CommandExecutor) {
+  constructor(executor?: ICommandExecutor) {
     this.executor = executor ?? defaultExecutor;
   }
 

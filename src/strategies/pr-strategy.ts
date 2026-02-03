@@ -1,6 +1,6 @@
 import { PRResult } from "../pr-creator.js";
 import { RepoInfo } from "../repo-detector.js";
-import { CommandExecutor, defaultExecutor } from "../command-executor.js";
+import { ICommandExecutor, defaultExecutor } from "../command-executor.js";
 import type { MergeMode, MergeStrategy } from "../config.js";
 
 export interface PRMergeConfig {
@@ -57,7 +57,7 @@ export interface CloseExistingPROptions {
  * Strategies focus on platform-specific logic (checkExistingPR, create, merge).
  * Use PRWorkflowExecutor for full workflow orchestration with error handling.
  */
-export interface PRStrategy {
+export interface IPRStrategy {
   /**
    * Check if a PR already exists for the given branch
    * @returns PR URL if exists, null otherwise
@@ -90,11 +90,11 @@ export interface PRStrategy {
   execute(options: PRStrategyOptions): Promise<PRResult>;
 }
 
-export abstract class BasePRStrategy implements PRStrategy {
+export abstract class BasePRStrategy implements IPRStrategy {
   protected bodyFilePath: string = ".pr-body.md";
-  protected executor: CommandExecutor;
+  protected executor: ICommandExecutor;
 
-  constructor(executor?: CommandExecutor) {
+  constructor(executor?: ICommandExecutor) {
     this.executor = executor ?? defaultExecutor;
   }
 
@@ -129,7 +129,7 @@ export abstract class BasePRStrategy implements PRStrategy {
  * 4. Handle errors and return failure result
  */
 export class PRWorkflowExecutor {
-  constructor(private readonly strategy: PRStrategy) {}
+  constructor(private readonly strategy: IPRStrategy) {}
 
   /**
    * Execute the full PR creation workflow with error handling.

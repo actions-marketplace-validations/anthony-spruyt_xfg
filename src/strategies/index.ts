@@ -4,14 +4,14 @@ import {
   isAzureDevOpsRepo,
   isGitLabRepo,
 } from "../repo-detector.js";
-import type { PRStrategy } from "./pr-strategy.js";
+import type { IPRStrategy } from "./pr-strategy.js";
 import { GitHubPRStrategy } from "./github-pr-strategy.js";
 import { AzurePRStrategy } from "./azure-pr-strategy.js";
 import { GitLabPRStrategy } from "./gitlab-pr-strategy.js";
-import { CommandExecutor } from "../command-executor.js";
+import { ICommandExecutor } from "../command-executor.js";
 
 export type {
-  PRStrategy,
+  IPRStrategy,
   PRStrategyOptions,
   CloseExistingPROptions,
   PRMergeConfig,
@@ -25,7 +25,7 @@ export { GitLabPRStrategy } from "./gitlab-pr-strategy.js";
 
 // Commit strategy exports
 export type {
-  CommitStrategy,
+  ICommitStrategy,
   CommitOptions,
   CommitResult,
   FileChange,
@@ -47,8 +47,8 @@ export {
  */
 export function getPRStrategy(
   repoInfo: RepoInfo,
-  executor?: CommandExecutor
-): PRStrategy {
+  executor?: ICommandExecutor
+): IPRStrategy {
   if (isGitHubRepo(repoInfo)) {
     return new GitHubPRStrategy(executor);
   }

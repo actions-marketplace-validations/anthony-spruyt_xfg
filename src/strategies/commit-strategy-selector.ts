@@ -1,8 +1,8 @@
 import { RepoInfo, isGitHubRepo } from "../repo-detector.js";
-import { CommitStrategy } from "./commit-strategy.js";
+import { ICommitStrategy } from "./commit-strategy.js";
 import { GitCommitStrategy } from "./git-commit-strategy.js";
 import { GraphQLCommitStrategy } from "./graphql-commit-strategy.js";
-import { CommandExecutor } from "../command-executor.js";
+import { ICommandExecutor } from "../command-executor.js";
 
 /**
  * Checks if GitHub App credentials are configured via environment variables.
@@ -29,8 +29,8 @@ export function hasGitHubAppCredentials(): boolean {
  */
 export function getCommitStrategy(
   repoInfo: RepoInfo,
-  executor?: CommandExecutor
-): CommitStrategy {
+  executor?: ICommandExecutor
+): ICommitStrategy {
   if (isGitHubRepo(repoInfo) && hasGitHubAppCredentials()) {
     return new GraphQLCommitStrategy(executor);
   }

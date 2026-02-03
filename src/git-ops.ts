@@ -8,22 +8,42 @@ import {
 } from "node:fs";
 import { join, resolve, relative, isAbsolute, dirname } from "node:path";
 import { escapeShellArg } from "./shell-utils.js";
-import { CommandExecutor, defaultExecutor } from "./command-executor.js";
+import { ICommandExecutor, defaultExecutor } from "./command-executor.js";
 import { withRetry } from "./retry-utils.js";
 import { logger } from "./logger.js";
+
+export interface IGitOps {
+  cleanWorkspace(): void;
+  clone(gitUrl: string): Promise<void>;
+  fetch(options?: { prune?: boolean }): Promise<void>;
+  createBranch(branchName: string): Promise<void>;
+  commit(message: string): Promise<boolean>;
+  push(branchName: string, options?: { force?: boolean }): Promise<void>;
+  getDefaultBranch(): Promise<{ branch: string; method: string }>;
+  writeFile(fileName: string, content: string): void;
+  setExecutable(fileName: string): Promise<void>;
+  getFileContent(fileName: string): string | null;
+  deleteFile(fileName: string): void;
+  wouldChange(fileName: string, content: string): boolean;
+  hasChanges(): Promise<boolean>;
+  getChangedFiles(): Promise<string[]>;
+  hasStagedChanges(): Promise<boolean>;
+  fileExistsOnBranch(fileName: string, branch: string): Promise<boolean>;
+  fileExists(fileName: string): boolean;
+}
 
 export interface GitOpsOptions {
   workDir: string;
   dryRun?: boolean;
-  executor?: CommandExecutor;
+  executor?: ICommandExecutor;
   /** Number of retries for network operations (default: 3) */
   retries?: number;
 }
 
-export class GitOps {
+export class GitOps implements IGitOps {
   private workDir: string;
   private dryRun: boolean;
-  private executor: CommandExecutor;
+  private executor: ICommandExecutor;
   private retries: number;
 
   constructor(options: GitOpsOptions) {

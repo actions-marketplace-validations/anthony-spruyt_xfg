@@ -77,6 +77,13 @@ export function validateRawConfig(config: RawConfig): void {
 
   const fileNames = hasFiles ? Object.keys(config.files!) : [];
 
+  // Check for reserved key 'inherit' at root files level
+  if (hasFiles && "inherit" in config.files!) {
+    throw new Error(
+      "'inherit' is a reserved key and cannot be used as a filename"
+    );
+  }
+
   // Validate each file definition
   for (const fileName of fileNames) {
     validateFileName(fileName);
@@ -200,6 +207,13 @@ export function validateRawConfig(config: RawConfig): void {
   // Validate root settings
   if (config.settings !== undefined) {
     validateSettings(config.settings, "Root");
+
+    // Check for reserved key 'inherit' at root rulesets level
+    if (config.settings.rulesets && "inherit" in config.settings.rulesets) {
+      throw new Error(
+        "'inherit' is a reserved key and cannot be used as a ruleset name"
+      );
+    }
   }
 
   // Validate githubHosts if provided
@@ -245,6 +259,17 @@ export function validateRawConfig(config: RawConfig): void {
       }
 
       for (const fileName of Object.keys(repo.files)) {
+        // Skip reserved key 'inherit'
+        if (fileName === "inherit") {
+          const inheritValue = (repo.files as Record<string, unknown>).inherit;
+          if (typeof inheritValue !== "boolean") {
+            throw new Error(
+              `Repo at index ${i}: files.inherit must be a boolean`
+            );
+          }
+          continue;
+        }
+
         // Ensure the file is defined at root level
         if (!config.files || !config.files[fileName]) {
           throw new Error(
@@ -371,7 +396,14 @@ export function validateRawConfig(config: RawConfig): void {
 
     // Validate per-repo settings
     if (repo.settings !== undefined) {
-      validateSettings(repo.settings, `Repo ${getGitDisplayName(repo.git)}`);
+      const rootRulesetNames = config.settings?.rulesets
+        ? Object.keys(config.settings.rulesets).filter((k) => k !== "inherit")
+        : [];
+      validateSettings(
+        repo.settings,
+        `Repo ${getGitDisplayName(repo.git)}`,
+        rootRulesetNames
+      );
     }
   }
 }
@@ -699,7 +731,11 @@ function validateRuleset(
 /**
  * Validates settings object containing rulesets.
  */
-export function validateSettings(settings: unknown, context: string): void {
+export function validateSettings(
+  settings: unknown,
+  context: string,
+  rootRulesetNames?: string[]
+): void {
   if (
     typeof settings !== "object" ||
     settings === null ||
@@ -721,6 +757,19 @@ export function validateSettings(settings: unknown, context: string): void {
 
     const rulesets = s.rulesets as Record<string, unknown>;
     for (const [name, ruleset] of Object.entries(rulesets)) {
+      // Skip reserved key
+      if (name === "inherit") continue;
+
+      // Check for opt-out of non-existent root ruleset
+      if (ruleset === false) {
+        if (rootRulesetNames && !rootRulesetNames.includes(name)) {
+          throw new Error(
+            `${context}: Cannot opt out of '${name}' - not defined in root settings.rulesets`
+          );
+        }
+        continue; // Skip further validation for false entries
+      }
+
       validateRuleset(ruleset, name, context);
     }
   }

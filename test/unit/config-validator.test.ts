@@ -224,6 +224,20 @@ describe("validateRawConfig", () => {
       });
       assert.doesNotThrow(() => validateRawConfig(config));
     });
+
+    test("throws when 'inherit' is used as a filename at root level", () => {
+      const config = createValidConfig({
+        files: {
+          "inherit.json": { content: { key: "value" } },
+          inherit: { content: "some text" },
+        },
+      });
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /'inherit' is a reserved key and cannot be used as a filename/
+      );
+    });
   });
 
   describe("per-file mergeStrategy validation", () => {
@@ -1439,6 +1453,134 @@ describe("validateRawConfig", () => {
   });
 
   describe("settings.rulesets validation", () => {
+    test("throws when 'inherit' is used as a ruleset name at root level", () => {
+      const config = createValidConfig({
+        settings: {
+          rulesets: {
+            inherit: { target: "branch" },
+          },
+        },
+      });
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /'inherit' is a reserved key and cannot be used as a ruleset name/
+      );
+    });
+
+    test("throws when opting out of non-existent ruleset", () => {
+      const config = createValidConfig({
+        settings: {
+          rulesets: {
+            "main-protection": { target: "branch" },
+          },
+        },
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            settings: {
+              rulesets: {
+                "nonexistent-ruleset": false,
+              },
+            },
+          },
+        ],
+      });
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /Cannot opt out of 'nonexistent-ruleset' - not defined in root settings\.rulesets/
+      );
+    });
+
+    test("allows opting out of existing ruleset with false", () => {
+      const config = createValidConfig({
+        settings: {
+          rulesets: {
+            "main-protection": { target: "branch" },
+          },
+        },
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            settings: {
+              rulesets: {
+                "main-protection": false,
+              },
+            },
+          },
+        ],
+      });
+
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("allows inherit: false in repo files", () => {
+      const config = createValidConfig({
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            files: {
+              inherit: false,
+            },
+          },
+        ],
+      });
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("allows inherit: true in repo files", () => {
+      const config = createValidConfig({
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            files: {
+              inherit: true,
+            },
+          },
+        ],
+      });
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("allows inherit: false in repo rulesets", () => {
+      const config = createValidConfig({
+        settings: {
+          rulesets: {
+            "main-protection": { target: "branch" },
+          },
+        },
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            settings: {
+              rulesets: {
+                inherit: false,
+              },
+            },
+          },
+        ],
+      });
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
+    test("throws when files.inherit is not a boolean", () => {
+      const config = createValidConfig({
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            files: {
+              inherit: "false" as unknown as boolean,
+            },
+          },
+        ],
+      });
+      assert.throws(
+        () => validateRawConfig(config),
+        /files\.inherit must be a boolean/
+      );
+    });
+
     test("allows valid root-level settings with rulesets", () => {
       const config = createValidConfig({
         settings: {

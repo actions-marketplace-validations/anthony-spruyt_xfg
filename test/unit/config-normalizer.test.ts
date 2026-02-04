@@ -1910,4 +1910,193 @@ describe("normalizeConfig", () => {
       );
     });
   });
+
+  describe("inheritance opt-out", () => {
+    describe("files inherit: false", () => {
+      test("inherit: false skips all root files", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: {
+            "eslint.json": { content: { extends: ["base"] } },
+            "prettier.json": { content: { semi: true } },
+          },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              files: {
+                inherit: false,
+              },
+            },
+          ],
+        };
+
+        const result = normalizeConfig(raw);
+        assert.equal(result.repos[0].files.length, 0);
+      });
+
+      test("inherit: false with custom file includes only custom", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: {
+            "eslint.json": { content: { extends: ["base"] } },
+            "custom.json": { content: {} },
+          },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              files: {
+                inherit: false,
+                "custom.json": { content: { custom: true } },
+              },
+            },
+          ],
+        };
+
+        const result = normalizeConfig(raw);
+        assert.equal(result.repos[0].files.length, 1);
+        assert.equal(result.repos[0].files[0].fileName, "custom.json");
+        assert.deepEqual(result.repos[0].files[0].content, { custom: true });
+      });
+
+      test("inherit: true is same as not specifying", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: {
+            "eslint.json": { content: { extends: ["base"] } },
+          },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              files: {
+                inherit: true,
+              },
+            },
+          ],
+        };
+
+        const result = normalizeConfig(raw);
+        assert.equal(result.repos[0].files.length, 1);
+        assert.equal(result.repos[0].files[0].fileName, "eslint.json");
+      });
+    });
+
+    describe("rulesets opt-out", () => {
+      test("rulesetName: false excludes single ruleset", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: { "config.json": { content: {} } },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              settings: {
+                rulesets: {
+                  "main-protection": false,
+                },
+              },
+            },
+          ],
+          settings: {
+            rulesets: {
+              "main-protection": { target: "branch", enforcement: "active" },
+              "release-protection": { target: "branch", enforcement: "active" },
+            },
+          },
+        };
+
+        const result = normalizeConfig(raw);
+        assert.ok(result.repos[0].settings?.rulesets);
+        assert.equal(
+          result.repos[0].settings?.rulesets?.["main-protection"],
+          undefined
+        );
+        assert.ok(result.repos[0].settings?.rulesets?.["release-protection"]);
+      });
+
+      test("rulesets inherit: false skips all root rulesets", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: { "config.json": { content: {} } },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              settings: {
+                rulesets: {
+                  inherit: false,
+                },
+              },
+            },
+          ],
+          settings: {
+            rulesets: {
+              "main-protection": { target: "branch" },
+              "release-protection": { target: "branch" },
+            },
+          },
+        };
+
+        const result = normalizeConfig(raw);
+        assert.equal(result.repos[0].settings?.rulesets, undefined);
+      });
+
+      test("rulesets inherit: false with custom ruleset includes only custom", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: { "config.json": { content: {} } },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              settings: {
+                rulesets: {
+                  inherit: false,
+                  "custom-ruleset": { target: "tag", enforcement: "active" },
+                },
+              },
+            },
+          ],
+          settings: {
+            rulesets: {
+              "main-protection": { target: "branch" },
+            },
+          },
+        };
+
+        const result = normalizeConfig(raw);
+        assert.ok(result.repos[0].settings?.rulesets);
+        assert.equal(
+          result.repos[0].settings?.rulesets?.["main-protection"],
+          undefined
+        );
+        assert.ok(result.repos[0].settings?.rulesets?.["custom-ruleset"]);
+        assert.equal(
+          result.repos[0].settings?.rulesets?.["custom-ruleset"]?.target,
+          "tag"
+        );
+      });
+
+      test("rulesets inherit: true is same as not specifying", () => {
+        const raw: RawConfig = {
+          id: "test-config",
+          files: { "config.json": { content: {} } },
+          repos: [
+            {
+              git: "git@github.com:org/repo.git",
+              settings: {
+                rulesets: {
+                  inherit: true,
+                },
+              },
+            },
+          ],
+          settings: {
+            rulesets: {
+              "main-protection": { target: "branch" },
+            },
+          },
+        };
+
+        const result = normalizeConfig(raw);
+        assert.ok(result.repos[0].settings?.rulesets?.["main-protection"]);
+      });
+    });
+  });
 });

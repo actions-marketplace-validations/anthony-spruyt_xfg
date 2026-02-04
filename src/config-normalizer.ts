@@ -90,18 +90,41 @@ export function mergeSettings(
   // Merge rulesets by name - each ruleset is deep merged
   const rootRulesets = root?.rulesets ?? {};
   const repoRulesets = perRepo?.rulesets ?? {};
+
+  // Check if repo opts out of all inherited rulesets
+  const inheritRulesets =
+    (repoRulesets as Record<string, unknown>)?.inherit !== false;
+
   const allRulesetNames = new Set([
-    ...Object.keys(rootRulesets),
-    ...Object.keys(repoRulesets),
+    ...Object.keys(rootRulesets).filter((name) => name !== "inherit"),
+    ...Object.keys(repoRulesets).filter((name) => name !== "inherit"),
   ]);
 
   if (allRulesetNames.size > 0) {
     result.rulesets = {};
     for (const name of allRulesetNames) {
+      const rootRuleset = rootRulesets[name];
+      const repoRuleset = repoRulesets[name];
+
+      // Skip if repo explicitly opts out of this ruleset
+      if (repoRuleset === false) {
+        continue;
+      }
+
+      // Skip root rulesets if inherit: false (unless repo has override)
+      if (!inheritRulesets && !repoRuleset && rootRuleset) {
+        continue;
+      }
+
       result.rulesets[name] = mergeRuleset(
-        rootRulesets[name],
-        repoRulesets[name]
+        rootRuleset as Ruleset | undefined,
+        repoRuleset as Ruleset | undefined
       );
+    }
+
+    // Clean up empty rulesets object
+    if (Object.keys(result.rulesets).length === 0) {
+      delete result.rulesets;
     }
   }
 
@@ -129,12 +152,25 @@ export function normalizeConfig(raw: RawConfig): Config {
     for (const gitUrl of gitUrls) {
       const files: FileContent[] = [];
 
+      // Check if repo opts out of all inherited files
+      const inheritFiles =
+        (rawRepo.files as Record<string, unknown> | undefined)?.inherit !==
+        false;
+
       // Step 2: Process each file definition
       for (const fileName of fileNames) {
+        // Skip reserved key
+        if (fileName === "inherit") continue;
+
         const repoOverride = rawRepo.files?.[fileName];
 
         // Skip excluded files (set to false)
         if (repoOverride === false) {
+          continue;
+        }
+
+        // Skip if inherit: false and no repo-specific override
+        if (!inheritFiles && !repoOverride) {
           continue;
         }
 
@@ -254,12 +290,34 @@ export function normalizeConfig(raw: RawConfig): Config {
     }
   }
 
+  // Normalize root settings (filter out inherit key if present)
+  let normalizedRootSettings: RepoSettings | undefined;
+  if (raw.settings) {
+    normalizedRootSettings = {};
+    if (raw.settings.rulesets) {
+      const filteredRulesets: Record<string, Ruleset> = {};
+      for (const [name, ruleset] of Object.entries(raw.settings.rulesets)) {
+        if (name === "inherit" || ruleset === false) continue;
+        filteredRulesets[name] = ruleset as Ruleset;
+      }
+      if (Object.keys(filteredRulesets).length > 0) {
+        normalizedRootSettings.rulesets = filteredRulesets;
+      }
+    }
+    if (raw.settings.deleteOrphaned !== undefined) {
+      normalizedRootSettings.deleteOrphaned = raw.settings.deleteOrphaned;
+    }
+    if (Object.keys(normalizedRootSettings).length === 0) {
+      normalizedRootSettings = undefined;
+    }
+  }
+
   return {
     id: raw.id,
     repos: expandedRepos,
     prTemplate: raw.prTemplate,
     githubHosts: raw.githubHosts,
     deleteOrphaned: raw.deleteOrphaned,
-    settings: raw.settings,
+    settings: normalizedRootSettings,
   };
 }

@@ -2459,4 +2459,191 @@ describe("hasActionableSettings", () => {
   test("returns false for deleteOrphaned only", () => {
     assert.equal(hasActionableSettings({ deleteOrphaned: true }), false);
   });
+
+  test("returns true when repo settings exist", () => {
+    assert.equal(
+      hasActionableSettings({
+        repo: {
+          hasIssues: true,
+        },
+      }),
+      true
+    );
+  });
+
+  test("returns true when both rulesets and repo exist", () => {
+    assert.equal(
+      hasActionableSettings({
+        rulesets: { "main-protection": { enforcement: "active" } },
+        repo: { hasIssues: true },
+      }),
+      true
+    );
+  });
+
+  test("returns false for empty repo settings", () => {
+    assert.equal(hasActionableSettings({ repo: {} }), false);
+  });
+});
+
+describe("validateRepoSettings", () => {
+  // Helper to create a minimal valid config with settings
+  const createSettingsConfig = (
+    repo: Record<string, unknown>
+  ): import("../../src/config.js").RawConfig => ({
+    id: "test-config",
+    settings: {
+      repo: repo as import("../../src/config.js").GitHubRepoSettings,
+    },
+    repos: [{ git: "git@github.com:org/repo.git" }],
+  });
+
+  test("rejects invalid visibility value", () => {
+    const config = createSettingsConfig({
+      visibility: "secret",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /visibility must be one of: public, private, internal/
+    );
+  });
+
+  test("rejects invalid squashMergeCommitTitle value", () => {
+    const config = createSettingsConfig({
+      squashMergeCommitTitle: "INVALID",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /squashMergeCommitTitle must be one of: PR_TITLE, COMMIT_OR_PR_TITLE/
+    );
+  });
+
+  test("rejects invalid squashMergeCommitMessage value", () => {
+    const config = createSettingsConfig({
+      squashMergeCommitMessage: "INVALID",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /squashMergeCommitMessage must be one of: PR_BODY, COMMIT_MESSAGES, BLANK/
+    );
+  });
+
+  test("rejects invalid mergeCommitTitle value", () => {
+    const config = createSettingsConfig({
+      mergeCommitTitle: "INVALID",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /mergeCommitTitle must be one of: PR_TITLE, MERGE_MESSAGE/
+    );
+  });
+
+  test("rejects invalid mergeCommitMessage value", () => {
+    const config = createSettingsConfig({
+      mergeCommitMessage: "INVALID",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /mergeCommitMessage must be one of: PR_BODY, PR_TITLE, BLANK/
+    );
+  });
+
+  test("rejects non-boolean hasIssues", () => {
+    const config = createSettingsConfig({
+      hasIssues: "yes",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /hasIssues must be a boolean/
+    );
+  });
+
+  test("rejects non-boolean allowSquashMerge", () => {
+    const config = createSettingsConfig({
+      allowSquashMerge: 1,
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /allowSquashMerge must be a boolean/
+    );
+  });
+
+  test("rejects non-boolean secretScanning", () => {
+    const config = createSettingsConfig({
+      secretScanning: "enabled",
+    });
+    assert.throws(
+      () => validateRawConfig(config),
+      /secretScanning must be a boolean/
+    );
+  });
+
+  test("accepts valid repo settings", () => {
+    const config = createSettingsConfig({
+      hasIssues: true,
+      visibility: "private",
+      allowSquashMerge: true,
+      squashMergeCommitTitle: "PR_TITLE",
+    });
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("accepts all valid feature settings", () => {
+    const config = createSettingsConfig({
+      hasIssues: true,
+      hasProjects: false,
+      hasWiki: true,
+      hasDiscussions: false,
+      isTemplate: false,
+      allowForking: true,
+      visibility: "public",
+      archived: false,
+    });
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("accepts all valid merge settings", () => {
+    const config = createSettingsConfig({
+      allowSquashMerge: true,
+      allowMergeCommit: false,
+      allowRebaseMerge: true,
+      allowAutoMerge: true,
+      deleteBranchOnMerge: true,
+      allowUpdateBranch: true,
+      squashMergeCommitTitle: "COMMIT_OR_PR_TITLE",
+      squashMergeCommitMessage: "COMMIT_MESSAGES",
+      mergeCommitTitle: "MERGE_MESSAGE",
+      mergeCommitMessage: "PR_BODY",
+    });
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("accepts all valid security settings", () => {
+    const config = createSettingsConfig({
+      vulnerabilityAlerts: true,
+      automatedSecurityFixes: true,
+      secretScanning: true,
+      secretScanningPushProtection: true,
+      privateVulnerabilityReporting: true,
+    });
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("accepts internal visibility", () => {
+    const config = createSettingsConfig({
+      visibility: "internal",
+    });
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("rejects repo settings that is not an object", () => {
+    const config: import("../../src/config.js").RawConfig = {
+      id: "test-config",
+      settings: {
+        repo: "invalid" as never,
+      },
+      repos: [{ git: "git@github.com:org/repo.git" }],
+    };
+    assert.throws(() => validateRawConfig(config), /repo must be an object/);
+  });
 });

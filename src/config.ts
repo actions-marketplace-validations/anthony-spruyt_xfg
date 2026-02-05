@@ -332,12 +332,69 @@ export interface Ruleset {
 }
 
 // =============================================================================
+// GitHub Repository Settings Types
+// =============================================================================
+
+/** Squash merge commit title format */
+export type SquashMergeCommitTitle = "PR_TITLE" | "COMMIT_OR_PR_TITLE";
+
+/** Squash merge commit message format */
+export type SquashMergeCommitMessage = "PR_BODY" | "COMMIT_MESSAGES" | "BLANK";
+
+/** Merge commit title format */
+export type MergeCommitTitle = "PR_TITLE" | "MERGE_MESSAGE";
+
+/** Merge commit message format */
+export type MergeCommitMessage = "PR_BODY" | "PR_TITLE" | "BLANK";
+
+/** Repository visibility */
+export type RepoVisibility = "public" | "private" | "internal";
+
+/**
+ * GitHub repository settings configuration.
+ * All properties are optional - only specified properties are applied.
+ * @see https://docs.github.com/en/rest/repos/repos#update-a-repository
+ */
+export interface GitHubRepoSettings {
+  // Features
+  hasIssues?: boolean;
+  hasProjects?: boolean;
+  hasWiki?: boolean;
+  hasDiscussions?: boolean;
+  isTemplate?: boolean;
+  allowForking?: boolean;
+  visibility?: RepoVisibility;
+  archived?: boolean;
+
+  // Merge options
+  allowSquashMerge?: boolean;
+  allowMergeCommit?: boolean;
+  allowRebaseMerge?: boolean;
+  allowAutoMerge?: boolean;
+  deleteBranchOnMerge?: boolean;
+  allowUpdateBranch?: boolean;
+  squashMergeCommitTitle?: SquashMergeCommitTitle;
+  squashMergeCommitMessage?: SquashMergeCommitMessage;
+  mergeCommitTitle?: MergeCommitTitle;
+  mergeCommitMessage?: MergeCommitMessage;
+
+  // Security
+  vulnerabilityAlerts?: boolean;
+  automatedSecurityFixes?: boolean;
+  secretScanning?: boolean;
+  secretScanningPushProtection?: boolean;
+  privateVulnerabilityReporting?: boolean;
+}
+
+// =============================================================================
 // Settings
 // =============================================================================
 
 export interface RepoSettings {
   /** GitHub rulesets keyed by name */
   rulesets?: Record<string, Ruleset>;
+  /** GitHub repository settings */
+  repo?: GitHubRepoSettings;
   deleteOrphaned?: boolean;
 }
 
@@ -377,6 +434,7 @@ export interface RawRepoFileOverride {
 // Raw settings (before normalization)
 export interface RawRepoSettings {
   rulesets?: Record<string, Ruleset | false> & { inherit?: boolean };
+  repo?: GitHubRepoSettings;
   deleteOrphaned?: boolean;
 }
 

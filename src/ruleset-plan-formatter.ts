@@ -1,6 +1,10 @@
 // src/ruleset-plan-formatter.ts
 import chalk from "chalk";
-import type { RulesetChange, RulesetAction } from "./ruleset-diff.js";
+import {
+  projectToDesiredShape,
+  type RulesetChange,
+  type RulesetAction,
+} from "./ruleset-diff.js";
 import { RULESET_COMPARABLE_FIELDS, type Ruleset } from "./config.js";
 
 // =============================================================================
@@ -73,6 +77,14 @@ export function computePropertyDiffs(
             path
           )
         );
+      } else if (
+        Array.isArray(currentVal) &&
+        Array.isArray(desiredVal) &&
+        isArrayOfObjects(currentVal) &&
+        isArrayOfObjects(desiredVal)
+      ) {
+        // Recurse into arrays of objects
+        diffs.push(...diffObjectArrays(currentVal, desiredVal, path));
       } else {
         diffs.push({
           path,
@@ -115,6 +127,110 @@ function deepEqual(a: unknown, b: unknown): boolean {
   }
 
   return false;
+}
+
+function isArrayOfObjects(arr: unknown[]): boolean {
+  return arr.length > 0 && arr.every((item) => isObject(item));
+}
+
+/**
+ * Diff two arrays of objects by matching items on `type` field (or by index).
+ */
+function diffObjectArrays(
+  currentArr: unknown[],
+  desiredArr: unknown[],
+  parentPath: string[]
+): PropertyDiff[] {
+  const diffs: PropertyDiff[] = [];
+
+  const hasType = desiredArr.every(
+    (item) => isObject(item) && "type" in (item as Record<string, unknown>)
+  );
+
+  if (hasType) {
+    // Match by type field
+    const currentByType = new Map<
+      string,
+      { item: Record<string, unknown>; index: number }
+    >();
+    for (let i = 0; i < currentArr.length; i++) {
+      const item = currentArr[i] as Record<string, unknown>;
+      const type = item.type as string;
+      if (type) currentByType.set(type, { item, index: i });
+    }
+
+    const matchedTypes = new Set<string>();
+
+    for (let i = 0; i < desiredArr.length; i++) {
+      const desiredItem = desiredArr[i] as Record<string, unknown>;
+      const type = desiredItem.type as string;
+      const label = `[${i}] (${type})`;
+      const currentEntry = currentByType.get(type);
+
+      if (currentEntry) {
+        matchedTypes.add(type);
+        // Recurse into matched pair
+        const itemDiffs = computePropertyDiffs(currentEntry.item, desiredItem, [
+          ...parentPath,
+          label,
+        ]);
+        diffs.push(...itemDiffs);
+      } else {
+        // New item in desired
+        diffs.push({
+          path: [...parentPath, label],
+          action: "add",
+          newValue: desiredItem,
+        });
+      }
+    }
+
+    // Items in current but not in desired
+    for (const [type, entry] of currentByType) {
+      if (!matchedTypes.has(type)) {
+        diffs.push({
+          path: [...parentPath, `[${entry.index}] (${type})`],
+          action: "remove",
+          oldValue: entry.item,
+        });
+      }
+    }
+  } else {
+    // Fallback: match by index
+    const maxLen = Math.max(currentArr.length, desiredArr.length);
+    for (let i = 0; i < maxLen; i++) {
+      const label = `[${i}]`;
+      if (i >= currentArr.length) {
+        diffs.push({
+          path: [...parentPath, label],
+          action: "add",
+          newValue: desiredArr[i],
+        });
+      } else if (i >= desiredArr.length) {
+        diffs.push({
+          path: [...parentPath, label],
+          action: "remove",
+          oldValue: currentArr[i],
+        });
+      } else if (isObject(currentArr[i]) && isObject(desiredArr[i])) {
+        const itemDiffs = computePropertyDiffs(
+          currentArr[i] as Record<string, unknown>,
+          desiredArr[i] as Record<string, unknown>,
+          [...parentPath, label]
+        );
+        diffs.push(...itemDiffs);
+      } else if (!deepEqual(currentArr[i], desiredArr[i])) {
+        diffs.push({
+          path: [...parentPath, label],
+          action: "change",
+          oldValue: currentArr[i],
+          newValue: desiredArr[i],
+        });
+      }
+    }
+  }
+
+  return diffs;
 }
 
 // =============================================================================
@@ -170,22 +286,97 @@ function buildTree(diffs: PropertyDiff[]): TreeNode {
 }
 
 /**
- * Format a value for display.
+ * Format a value for inline display (scalars and simple arrays only).
  */
 function formatValue(val: unknown): string {
   if (val === null) return "null";
   if (val === undefined) return "undefined";
   if (typeof val === "string") return `"${val}"`;
   if (Array.isArray(val)) {
-    if (val.length <= 3) {
+    if (val.every((v) => typeof v !== "object" || v === null)) {
       return `[${val.map(formatValue).join(", ")}]`;
     }
-    return `[${val.slice(0, 3).map(formatValue).join(", ")}, ... (${val.length - 3} more)]`;
+    // Arrays of objects are rendered by renderNestedValue
+    return `[${val.length} items]`;
   }
   if (typeof val === "object") {
-    return "{...}";
+    // Objects are rendered by renderNestedValue
+    return `{${Object.keys(val).length} properties}`;
   }
   return String(val);
+}
+
+/**
+ * Render a nested value (object or array) as indented tree lines.
+ */
+function renderNestedValue(
+  val: unknown,
+  action: DiffAction,
+  indent: number
+): string[] {
+  const lines: string[] = [];
+  const style = getActionStyle(action);
+  const indentStr = "    ".repeat(indent);
+
+  if (Array.isArray(val)) {
+    for (let i = 0; i < val.length; i++) {
+      const item = val[i];
+      if (isObject(item)) {
+        const obj = item as Record<string, unknown>;
+        const typeLabel = "type" in obj ? ` (${obj.type})` : "";
+        lines.push(
+          style.color(`${indentStr}${style.symbol} [${i}]${typeLabel}:`)
+        );
+        lines.push(...renderNestedObject(obj, action, indent + 1));
+      } else {
+        lines.push(
+          style.color(
+            `${indentStr}${style.symbol} [${i}]: ${formatValue(item)}`
+          )
+        );
+      }
+    }
+  } else if (isObject(val)) {
+    lines.push(
+      ...renderNestedObject(val as Record<string, unknown>, action, indent)
+    );
+  }
+
+  return lines;
+}
+
+function renderNestedObject(
+  obj: Record<string, unknown>,
+  action: DiffAction,
+  indent: number
+): string[] {
+  const lines: string[] = [];
+  const style = getActionStyle(action);
+  const indentStr = "    ".repeat(indent);
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === null || value === undefined) continue;
+
+    if (Array.isArray(value) && value.some((v) => isObject(v))) {
+      lines.push(style.color(`${indentStr}${style.symbol} ${key}:`));
+      lines.push(...renderNestedValue(value, action, indent + 1));
+    } else if (isObject(value)) {
+      lines.push(style.color(`${indentStr}${style.symbol} ${key}:`));
+      lines.push(
+        ...renderNestedObject(
+          value as Record<string, unknown>,
+          action,
+          indent + 1
+        )
+      );
+    } else {
+      lines.push(
+        style.color(`${indentStr}${style.symbol} ${key}: ${formatValue(value)}`)
+      );
+    }
+  }
+
+  return lines;
 }
 
 /**
@@ -224,17 +415,53 @@ function renderTree(node: TreeNode, indent: number = 0): string[] {
       lines.push(...renderTree(child, indent + 1));
     } else {
       // Leaf node with value
-      let valuePart = "";
-      if (child.action === "change") {
-        valuePart = `: ${formatValue(child.oldValue)} → ${formatValue(child.newValue)}`;
-      } else if (child.action === "add") {
-        valuePart = `: ${formatValue(child.newValue)}`;
-      } else if (child.action === "remove") {
-        valuePart = ` (was: ${formatValue(child.oldValue)})`;
+      const hasComplexNew =
+        isObject(child.newValue) ||
+        (Array.isArray(child.newValue) &&
+          child.newValue.some((v) => isObject(v)));
+      const hasComplexOld =
+        isObject(child.oldValue) ||
+        (Array.isArray(child.oldValue) &&
+          (child.oldValue as unknown[]).some((v) => isObject(v)));
+
+      if (child.action === "add" && hasComplexNew) {
+        lines.push(style.color(`${indentStr}${style.symbol} ${child.name}:`));
+        lines.push(
+          ...renderNestedValue(child.newValue, child.action, indent + 1)
+        );
+      } else if (child.action === "remove" && hasComplexOld) {
+        lines.push(
+          style.color(`${indentStr}${style.symbol} ${child.name} (removed):`)
+        );
+        lines.push(
+          ...renderNestedValue(child.oldValue, child.action, indent + 1)
+        );
+      } else if (
+        child.action === "change" &&
+        (hasComplexNew || hasComplexOld)
+      ) {
+        lines.push(style.color(`${indentStr}${style.symbol} ${child.name}:`));
+        if (hasComplexOld) {
+          lines.push(
+            ...renderNestedValue(child.oldValue, "remove", indent + 1)
+          );
+        }
+        if (hasComplexNew) {
+          lines.push(...renderNestedValue(child.newValue, "add", indent + 1));
+        }
+      } else {
+        let valuePart = "";
+        if (child.action === "change") {
+          valuePart = `: ${formatValue(child.oldValue)} → ${formatValue(child.newValue)}`;
+        } else if (child.action === "add") {
+          valuePart = `: ${formatValue(child.newValue)}`;
+        } else if (child.action === "remove") {
+          valuePart = ` (was: ${formatValue(child.oldValue)})`;
+        }
+        lines.push(
+          style.color(`${indentStr}${style.symbol} ${child.name}${valuePart}`)
+        );
       }
-      lines.push(
-        style.color(`${indentStr}${style.symbol} ${child.name}${valuePart}`)
-      );
     }
   }
 
@@ -389,7 +616,11 @@ export function formatRulesetPlan(changes: RulesetChange[]): RulesetPlanResult {
         const desiredNorm = normalizeForDiff(
           change.desired as unknown as Record<string, unknown>
         );
-        const diffs = computePropertyDiffs(currentNorm, desiredNorm);
+        const projectedCurrent = projectToDesiredShape(
+          currentNorm,
+          desiredNorm
+        ) as Record<string, unknown>;
+        const diffs = computePropertyDiffs(projectedCurrent, desiredNorm);
         const treeLines = formatPropertyTree(diffs);
         for (const line of treeLines) {
           lines.push(`        ${line}`);

@@ -408,6 +408,161 @@ describe("formatSummary", () => {
       assert.ok(markdown.includes("[PR #PR]"));
     });
   });
+
+  describe("dry-run mode", () => {
+    test("appends '(Dry Run)' to the title", () => {
+      const data: SummaryData = {
+        title: "Config Sync Summary",
+        dryRun: true,
+        total: 1,
+        succeeded: 1,
+        skipped: 0,
+        failed: 0,
+        results: [],
+      };
+
+      const markdown = formatSummary(data);
+
+      assert.ok(markdown.includes("## Config Sync Summary (Dry Run)"));
+    });
+
+    test("includes warning admonition banner", () => {
+      const data: SummaryData = {
+        title: "Config Sync Summary",
+        dryRun: true,
+        total: 1,
+        succeeded: 1,
+        skipped: 0,
+        failed: 0,
+        results: [],
+      };
+
+      const markdown = formatSummary(data);
+
+      assert.ok(markdown.includes("> [!WARNING]"));
+      assert.ok(
+        markdown.includes("> This was a dry run — no changes were applied")
+      );
+    });
+
+    test("stats table shows hypothetical labels", () => {
+      const data: SummaryData = {
+        title: "Config Sync Summary",
+        dryRun: true,
+        total: 3,
+        succeeded: 1,
+        skipped: 1,
+        failed: 1,
+        results: [],
+      };
+
+      const markdown = formatSummary(data);
+
+      assert.ok(markdown.includes("✅ Would Succeed"));
+      assert.ok(markdown.includes("⏭️ Would Skip"));
+      assert.ok(markdown.includes("❌ Would Fail"));
+      assert.ok(!markdown.includes("✅ Succeeded"));
+      assert.ok(!markdown.includes("⏭️ Skipped"));
+      assert.ok(!markdown.includes("❌ Failed"));
+    });
+
+    test("repo detail statuses show hypothetical wording", () => {
+      const results: RepoResult[] = [
+        {
+          repoName: "org/repo-a",
+          status: "succeeded",
+          message: "PR created",
+          prUrl: "https://github.com/org/repo-a/pull/42",
+          mergeOutcome: "manual",
+        },
+        {
+          repoName: "org/repo-b",
+          status: "succeeded",
+          message: "Auto-merge enabled",
+          prUrl: "https://github.com/org/repo-b/pull/15",
+          mergeOutcome: "auto",
+        },
+        {
+          repoName: "org/repo-c",
+          status: "succeeded",
+          message: "PR merged",
+          prUrl: "https://github.com/org/repo-c/pull/99",
+          mergeOutcome: "force",
+        },
+        {
+          repoName: "org/repo-d",
+          status: "succeeded",
+          message: "Pushed to main",
+          mergeOutcome: "direct",
+        },
+        {
+          repoName: "org/repo-e",
+          status: "skipped",
+          message: "No changes",
+        },
+        {
+          repoName: "org/repo-f",
+          status: "failed",
+          message: "Clone failed",
+        },
+      ];
+      const data: SummaryData = {
+        title: "Config Sync Summary",
+        dryRun: true,
+        total: 6,
+        succeeded: 4,
+        skipped: 1,
+        failed: 1,
+        results,
+      };
+
+      const markdown = formatSummary(data);
+
+      assert.ok(markdown.includes("✅ Would Open"));
+      assert.ok(markdown.includes("✅ Would Auto-merge"));
+      assert.ok(markdown.includes("✅ Would Merge"));
+      assert.ok(markdown.includes("✅ Would Push"));
+      assert.ok(markdown.includes("⏭️ Would Skip"));
+      assert.ok(markdown.includes("❌ Would Fail"));
+    });
+
+    test("dryRun false produces normal output", () => {
+      const data: SummaryData = {
+        title: "Config Sync Summary",
+        dryRun: false,
+        total: 1,
+        succeeded: 1,
+        skipped: 0,
+        failed: 0,
+        results: [],
+      };
+
+      const markdown = formatSummary(data);
+
+      assert.ok(markdown.includes("## Config Sync Summary"));
+      assert.ok(!markdown.includes("(Dry Run)"));
+      assert.ok(!markdown.includes("[!WARNING]"));
+      assert.ok(markdown.includes("✅ Succeeded"));
+    });
+
+    test("dryRun undefined produces normal output", () => {
+      const data: SummaryData = {
+        title: "Config Sync Summary",
+        total: 1,
+        succeeded: 1,
+        skipped: 0,
+        failed: 0,
+        results: [],
+      };
+
+      const markdown = formatSummary(data);
+
+      assert.ok(markdown.includes("## Config Sync Summary"));
+      assert.ok(!markdown.includes("(Dry Run)"));
+      assert.ok(!markdown.includes("[!WARNING]"));
+      assert.ok(markdown.includes("✅ Succeeded"));
+    });
+  });
 });
 
 describe("writeSummary", () => {

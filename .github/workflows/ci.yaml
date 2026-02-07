@@ -66,6 +66,18 @@ jobs:
           path: dist/
           retention-days: 1
 
+      - name: Create package for action tests
+        if: github.event_name == 'push'
+        run: npm pack
+
+      - name: Upload package artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v6
+        with:
+          name: package
+          path: "*.tgz"
+          retention-days: 1
+
   # GitHub PAT integration tests
   integration-test-github:
     needs:
@@ -333,8 +345,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: npm run test:integration:github-repo-settings
 
-  # Combined action tests (PAT + GitHub App)
-  integration-test-action:
+  # GitHub Action test — PAT credentials
+  integration-test-action-pat:
     needs:
       - "build"
       - "integration-test-github"
@@ -349,7 +361,6 @@ jobs:
     env:
       TEST_REPO: anthony-spruyt/xfg-test
       PAT_BRANCH: chore/sync-my-config
-      APP_BRANCH: chore/sync-app-test
 
     steps:
       - uses: actions/checkout@v6
@@ -369,28 +380,35 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Create local package for testing
-        run: |
-          npm pack
-          echo "XFG_PACKAGE=$(ls aspruyt-xfg-*.tgz)" >> "$GITHUB_ENV"
+      - name: Download package artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: package
 
-      # ========== PAT Test ==========
-      - name: "[PAT] Setup - clean up from previous runs"
+      - name: Set package path
+        run: echo "XFG_PACKAGE=$(ls aspruyt-xfg-*.tgz)" >> "$GITHUB_ENV"
+
+      # Cleanup before — teardown leftover state from previous runs
+      - name: Cleanup — teardown leftover state
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: .github/scripts/cleanup-test-pr.sh "${TEST_REPO}" "${PAT_BRANCH}"
+        run: |
+          .github/scripts/cleanup-test-pr.sh "${TEST_REPO}" "${PAT_BRANCH}"
+          .github/scripts/delete-manifest.sh "${TEST_REPO}"
 
-      - name: "[PAT] Seed manifest to trigger update path (bug #268)"
+      # Arrange — seed manifest and configure git identity
+      - name: Arrange — seed manifest
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: .github/scripts/seed-manifest.sh "${TEST_REPO}"
 
-      - name: "[PAT] Configure custom git identity (to verify action preserves it)"
+      - name: Arrange — configure custom git identity
         run: |
           git config --global user.name "test-user"
           git config --global user.email "test@example.com"
 
-      - name: "[PAT] Run xfg action"
+      # Act — run xfg action with PAT
+      - name: Act — run xfg action
         uses: ./
         with:
           config: ./test/fixtures/integration-test-action-github.yaml
@@ -398,7 +416,8 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           xfg-package: "./${{ env.XFG_PACKAGE }}"
 
-      - name: "[PAT] Validate - verify PR created and git identity preserved"
+      # Assert — verify PR created and git identity preserved
+      - name: Assert — verify PR created and git identity preserved
         id: pat-validate
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -426,12 +445,13 @@ jobs:
           # Export commit SHA for next step
           echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: "[PAT] Validate - verify file count in commit message (#268)"
+      - name: Assert — verify file count in commit message
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: .github/scripts/verify-commit-file-count.sh "${TEST_REPO}" "${{ steps.pat-validate.outputs.commit_sha }}"
 
-      - name: "[PAT] Cleanup - close PR and delete seeded manifest"
+      # Cleanup — always runs regardless of pass/fail
+      - name: Cleanup — teardown test state
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -439,19 +459,65 @@ jobs:
           .github/scripts/cleanup-test-pr.sh "${TEST_REPO}" "${PAT_BRANCH}"
           .github/scripts/delete-manifest.sh "${TEST_REPO}"
 
-      # ========== GitHub App Test ==========
-      # Helper scripts use PAT. The xfg action handles GitHub App auth internally.
-      - name: "[App] Setup - clean up from previous runs"
+  # GitHub Action test — GitHub App credentials (isolated, no GH_TOKEN in Act step)
+  integration-test-action-app:
+    needs:
+      - "build"
+      - "integration-test-github"
+      - "integration-test-github-app"
+    if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: integration-github
+      cancel-in-progress: false
+
+    env:
+      TEST_REPO: anthony-spruyt/xfg-test
+      APP_BRANCH: chore/sync-app-test
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: package
+
+      - name: Set package path
+        run: echo "XFG_PACKAGE=$(ls aspruyt-xfg-*.tgz)" >> "$GITHUB_ENV"
+
+      # Cleanup before — teardown leftover state from previous runs
+      - name: Cleanup — teardown leftover state
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: .github/scripts/cleanup-test-pr.sh "${TEST_REPO}" "${APP_BRANCH}"
+        run: |
+          .github/scripts/cleanup-test-pr.sh "${TEST_REPO}" "${APP_BRANCH}"
+          .github/scripts/delete-manifest.sh "${TEST_REPO}"
 
-      - name: "[App] Seed manifest to trigger update path (bug #268)"
+      # Arrange — seed manifest
+      - name: Arrange — seed manifest
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: .github/scripts/seed-manifest.sh "${TEST_REPO}"
 
-      - name: "[App] Run xfg action with GitHub App credentials"
+      # Act — run xfg action with GitHub App credentials (NO GH_TOKEN)
+      - name: Act — run xfg action with GitHub App credentials
         uses: ./
         with:
           config: ./test/fixtures/integration-test-action-github.yaml
@@ -463,7 +529,8 @@ jobs:
           github-app-private-key: ${{ secrets.TEST_APP_PRIVATE_KEY }}
           xfg-package: "./${{ env.XFG_PACKAGE }}"
 
-      - name: "[App] Validate - verify commit author is GitHub App (#268)"
+      # Assert — verify commit author is GitHub App
+      - name: Assert — verify commit author is GitHub App
         id: app-validate
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -494,12 +561,13 @@ jobs:
           # Export commit SHA for next step
           echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: "[App] Validate - verify file count in commit message (#268)"
+      - name: Assert — verify file count in commit message
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: .github/scripts/verify-commit-file-count.sh "${TEST_REPO}" "${{ steps.app-validate.outputs.commit_sha }}"
 
-      - name: "[App] Cleanup - close PR and delete seeded manifest"
+      # Cleanup — always runs regardless of pass/fail
+      - name: Cleanup — teardown test state
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -507,8 +575,61 @@ jobs:
           .github/scripts/cleanup-test-pr.sh "${TEST_REPO}" "${APP_BRANCH}"
           .github/scripts/delete-manifest.sh "${TEST_REPO}"
 
-      # ========== Settings Test ==========
-      - name: "[Settings] Run xfg action with settings command"
+  # GitHub Action test — settings command
+  integration-test-action-settings:
+    needs:
+      - "build"
+      - "integration-test-github"
+      - "integration-test-github-app"
+    if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: integration-github
+      cancel-in-progress: false
+
+    env:
+      TEST_REPO: anthony-spruyt/xfg-test
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: package
+
+      - name: Set package path
+        run: echo "XFG_PACKAGE=$(ls aspruyt-xfg-*.tgz)" >> "$GITHUB_ENV"
+
+      # Cleanup before — teardown leftover rulesets from previous runs
+      - name: Cleanup — teardown leftover rulesets
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          RULESET_ID=$(gh api repos/${TEST_REPO}/rulesets --jq '.[] | select(.name == "xfg-test-ruleset") | .id')
+          if [ -n "$RULESET_ID" ]; then
+            gh api --method DELETE repos/${TEST_REPO}/rulesets/${RULESET_ID}
+            echo "Cleaned up leftover test ruleset"
+          fi
+
+      # Act — run xfg action with settings command
+      - name: Act — run xfg action with settings command
         uses: ./
         with:
           command: settings
@@ -516,7 +637,8 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           xfg-package: "./${{ env.XFG_PACKAGE }}"
 
-      - name: "[Settings] Validate - verify ruleset was created"
+      # Assert — verify ruleset was created
+      - name: Assert — verify ruleset was created
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
@@ -527,7 +649,8 @@ jobs:
           fi
           echo "Ruleset created successfully"
 
-      - name: "[Settings] Cleanup - delete test ruleset"
+      # Cleanup — always runs regardless of pass/fail
+      - name: Cleanup — teardown test ruleset
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -549,6 +672,8 @@ jobs:
       - "integration-test-gitlab"
       - "integration-test-github-rulesets"
       - "integration-test-github-repo-settings"
-      - "integration-test-action"
+      - "integration-test-action-pat"
+      - "integration-test-action-app"
+      - "integration-test-action-settings"
     if: "always()"
     uses: "anthony-spruyt/repo-operator/.github/workflows/_summary.yaml@main"

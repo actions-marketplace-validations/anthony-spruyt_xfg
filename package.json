@@ -1,6 +1,6 @@
 {
   "name": "@aspruyt/xfg",
-  "version": "3.5.3",
+  "version": "3.5.4",
   "description": "CLI tool for repository-as-code",
   "type": "module",
   "main": "dist/index.js",

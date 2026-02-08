@@ -30,7 +30,7 @@ import {
 import { RepoConfig } from "./config.js";
 import { RepoInfo } from "./repo-detector.js";
 import { ProcessorOptions } from "./repository-processor.js";
-import { writeSummary, RepoResult } from "./github-summary.js";
+import { RepoResult } from "./github-summary.js";
 import { buildRepoResult, buildErrorResult } from "./summary-utils.js";
 import {
   RulesetProcessor,
@@ -43,6 +43,13 @@ import {
   RepoSettingsProcessor,
   IRepoSettingsProcessor,
 } from "./repo-settings-processor.js";
+import { Plan, printPlan } from "./plan-formatter.js";
+import { writePlanSummary } from "./plan-summary.js";
+import {
+  rulesetResultToResources,
+  syncResultToResources,
+  repoSettingsResultToResources,
+} from "./resource-converters.js";
 
 /**
  * Processor interface for dependency injection in tests.
@@ -232,6 +239,9 @@ export async function runSync(
   const processor = processorFactory();
   const results: RepoResult[] = [];
 
+  // Build plan for Terraform-style output
+  const plan: Plan = { resources: [], errors: [] };
+
   for (let i = 0; i < config.repos.length; i++) {
     const repoConfig = config.repos[i];
 
@@ -257,6 +267,10 @@ export async function runSync(
     } catch (error) {
       logger.error(current, repoConfig.git, String(error));
       results.push(buildErrorResult(repoConfig.git, error));
+      plan.errors!.push({
+        repo: repoConfig.git,
+        message: error instanceof Error ? error.message : String(error),
+      });
       continue;
     }
 
@@ -288,29 +302,32 @@ export async function runSync(
       } else {
         logger.error(current, repoName, result.message);
       }
+
+      // Collect resources for plan output
+      plan.resources.push(
+        ...syncResultToResources(repoName, repoConfig, result)
+      );
     } catch (error) {
       logger.error(current, repoName, String(error));
       results.push(buildErrorResult(repoName, error));
+      plan.errors!.push({
+        repo: repoName,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
-  logger.summary();
+  // Print Terraform-style plan summary
+  console.log("");
+  printPlan(plan);
 
-  // Write GitHub Actions job summary if running in GitHub Actions
-  const succeeded = results.filter((r) => r.status === "succeeded").length;
-  const skipped = results.filter((r) => r.status === "skipped").length;
-  const failed = results.filter((r) => r.status === "failed").length;
-  writeSummary({
+  // Write GitHub Actions job summary
+  writePlanSummary(plan, {
     title: "Config Sync Summary",
-    dryRun: options.dryRun,
-    total: config.repos.length,
-    succeeded,
-    skipped,
-    failed,
-    results,
+    dryRun: options.dryRun ?? false,
   });
 
-  if (logger.hasFailures()) {
+  if (plan.errors && plan.errors.length > 0) {
     process.exit(1);
   }
 }
@@ -380,15 +397,9 @@ export async function runSettings(
   const processor = processorFactory();
   const repoProcessor = repoProcessorFactory();
   const results: RepoResult[] = [];
-  let successCount = 0;
-  let failCount = 0;
-  let skipCount = 0;
 
-  // Tracking for multi-repo summary in dry-run mode
-  let totalCreates = 0;
-  let totalUpdates = 0;
-  let totalDeletes = 0;
-  let reposWithChanges = 0;
+  // Build plan for Terraform-style output
+  const plan: Plan = { resources: [], errors: [] };
 
   for (let i = 0; i < reposWithRulesets.length; i++) {
     const repoConfig = reposWithRulesets[i];
@@ -401,7 +412,10 @@ export async function runSettings(
     } catch (error) {
       logger.error(i + 1, repoConfig.git, String(error));
       results.push(buildErrorResult(repoConfig.git, error));
-      failCount++;
+      plan.errors!.push({
+        repo: repoConfig.git,
+        message: error instanceof Error ? error.message : String(error),
+      });
       continue;
     }
 
@@ -414,7 +428,18 @@ export async function runSettings(
         repoName,
         "GitHub Rulesets only supported for GitHub repos"
       );
-      skipCount++;
+      // Mark all rulesets from this repo as skipped
+      if (repoConfig.settings?.rulesets) {
+        for (const rulesetName of Object.keys(repoConfig.settings.rulesets)) {
+          plan.resources.push({
+            type: "ruleset",
+            repo: repoName,
+            name: rulesetName,
+            action: "skipped",
+            skipReason: "GitHub Rulesets only supported for GitHub repos",
+          });
+        }
+      }
       continue;
     }
 
@@ -433,36 +458,10 @@ export async function runSettings(
         noDelete: options.noDelete,
       });
 
-      // Display plan output for dry-run mode
-      if (options.dryRun && result.planOutput) {
-        if (result.planOutput.lines.length > 0) {
-          logger.rulesetPlan(repoName, result.planOutput.lines, {
-            creates: result.planOutput.creates,
-            updates: result.planOutput.updates,
-            deletes: result.planOutput.deletes,
-            unchanged: result.planOutput.unchanged,
-          });
-        }
-        // Accumulate totals for multi-repo summary
-        totalCreates += result.planOutput.creates;
-        totalUpdates += result.planOutput.updates;
-        totalDeletes += result.planOutput.deletes;
-        if (
-          result.planOutput.creates +
-            result.planOutput.updates +
-            result.planOutput.deletes >
-          0
-        ) {
-          reposWithChanges++;
-        }
-      }
-
       if (result.skipped) {
         logger.skip(i + 1, repoName, result.message);
-        skipCount++;
       } else if (result.success) {
         logger.success(i + 1, repoName, result.message);
-        successCount++;
 
         // Update manifest with ruleset tracking if there are rulesets to track
         if (
@@ -493,7 +492,6 @@ export async function runSettings(
         }
       } else {
         logger.error(i + 1, repoName, result.message);
-        failCount++;
       }
 
       results.push({
@@ -506,10 +504,16 @@ export async function runSettings(
         message: result.message,
         rulesetPlanDetails: result.planOutput?.entries,
       });
+
+      // Collect resources for plan output
+      plan.resources.push(...rulesetResultToResources(repoName, result));
     } catch (error) {
       logger.error(i + 1, repoName, String(error));
       results.push(buildErrorResult(repoName, error));
-      failCount++;
+      plan.errors!.push({
+        repo: repoName,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -530,7 +534,10 @@ export async function runSettings(
         });
       } catch (error) {
         console.error(`Failed to parse ${repoConfig.git}: ${error}`);
-        failCount++;
+        plan.errors!.push({
+          repo: repoConfig.git,
+          message: error instanceof Error ? error.message : String(error),
+        });
         continue;
       }
 
@@ -562,10 +569,8 @@ export async function runSettings(
           // Silent skip for repos without repo settings
         } else if (result.success) {
           console.log(chalk.green(`  ✓ ${repoName}: ${result.message}`));
-          successCount++;
         } else {
           console.log(chalk.red(`  ✗ ${repoName}: ${result.message}`));
-          failCount++;
         }
 
         // Merge repo settings plan details into existing result or push new
@@ -582,49 +587,30 @@ export async function runSettings(
             });
           }
         }
+
+        // Collect resources for plan output
+        plan.resources.push(...repoSettingsResultToResources(repoName, result));
       } catch (error) {
         console.error(`  ✗ ${repoName}: ${error}`);
-        failCount++;
+        plan.errors!.push({
+          repo: repoName,
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
 
-  // Multi-repo summary for dry-run mode
-  if (options.dryRun && reposWithChanges > 0) {
-    console.log("");
-    console.log(chalk.gray("─".repeat(40)));
-    const totalParts: string[] = [];
-    if (totalCreates > 0)
-      totalParts.push(chalk.green(`${totalCreates} to create`));
-    if (totalUpdates > 0)
-      totalParts.push(chalk.yellow(`${totalUpdates} to update`));
-    if (totalDeletes > 0)
-      totalParts.push(chalk.red(`${totalDeletes} to delete`));
-    console.log(
-      chalk.bold(
-        `Total: ${totalParts.join(", ")} across ${reposWithChanges} ${reposWithChanges === 1 ? "repository" : "repositories"}`
-      )
-    );
-  }
+  // Print Terraform-style plan summary
+  console.log("");
+  printPlan(plan);
 
-  // Summary
-  console.log("\n" + "=".repeat(50));
-  console.log(
-    `Completed: ${successCount} succeeded, ${skipCount} skipped, ${failCount} failed`
-  );
-
-  // Write GitHub Actions job summary if available
-  writeSummary({
+  // Write GitHub Actions job summary
+  writePlanSummary(plan, {
     title: "Repository Settings Summary",
-    dryRun: options.dryRun,
-    total: reposWithRulesets.length + reposWithRepoSettings.length,
-    succeeded: successCount,
-    skipped: skipCount,
-    failed: failCount,
-    results,
+    dryRun: options.dryRun ?? false,
   });
 
-  if (failCount > 0) {
+  if (plan.errors && plan.errors.length > 0) {
     process.exit(1);
   }
 }

@@ -1493,6 +1493,65 @@ describe("validateRawConfig", () => {
       );
     });
 
+    test("throws when root settings has repo: false", () => {
+      const config = createValidConfig({
+        settings: {
+          repo: false as never,
+        },
+        files: undefined,
+      });
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /repo: false is not valid at root level/
+      );
+    });
+
+    test("throws when per-repo repo: false but no root repo settings defined", () => {
+      const config = createValidConfig({
+        settings: {
+          rulesets: {
+            "main-protection": { target: "branch" },
+          },
+        },
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            settings: {
+              repo: false as never,
+            },
+          },
+        ],
+      });
+
+      assert.throws(
+        () => validateRawConfig(config),
+        /Cannot opt out of repo settings .* not defined in root settings/
+      );
+    });
+
+    test("allows per-repo repo: false when root repo settings exist", () => {
+      const config = createValidConfig({
+        settings: {
+          repo: {
+            hasIssues: true,
+            hasWiki: true,
+          },
+        },
+        repos: [
+          {
+            git: "git@github.com:org/repo.git",
+            settings: {
+              repo: false as never,
+            },
+          },
+        ],
+        files: undefined,
+      });
+
+      assert.doesNotThrow(() => validateRawConfig(config));
+    });
+
     test("allows opting out of existing ruleset with false", () => {
       const config = createValidConfig({
         settings: {
@@ -2483,6 +2542,10 @@ describe("hasActionableSettings", () => {
 
   test("returns false for empty repo settings", () => {
     assert.equal(hasActionableSettings({ repo: {} }), false);
+  });
+
+  test("returns false when repo is false (opt-out)", () => {
+    assert.equal(hasActionableSettings({ repo: false as never }), false);
   });
 });
 

@@ -1,18 +1,10 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import {
-  RepoConfig,
-  FileContent,
-  ContentValue,
-  convertContentToString,
-} from "./config.js";
+import { RepoConfig } from "./config.js";
 import {
   RepoInfo,
   getRepoDisplayName,
   isGitHubRepo,
   GitHubRepoInfo,
 } from "./repo-detector.js";
-import { interpolateXfgContent } from "./xfg-template.js";
 import { GitOps, GitOpsOptions } from "./git-ops.js";
 import {
   AuthenticatedGitOps,
@@ -22,27 +14,27 @@ import {
 import { createPR, mergePR, PRResult, FileAction } from "./pr-creator.js";
 import { logger, ILogger } from "./logger.js";
 import {
-  getPRStrategy,
   getCommitStrategy,
   hasGitHubAppCredentials,
 } from "./strategies/index.js";
 import type { PRMergeConfig, FileChange } from "./strategies/index.js";
 import { ICommandExecutor, defaultExecutor } from "./command-executor.js";
-import {
-  getFileStatus,
-  generateDiff,
-  createDiffStats,
-  incrementDiffStats,
-  DiffStats,
-} from "./diff-utils.js";
+import { incrementDiffStats, DiffStats } from "./diff-utils.js";
 import {
   loadManifest,
   saveManifest,
-  updateManifest,
   updateManifestRulesets,
   MANIFEST_FILENAME,
 } from "./manifest.js";
 import { GitHubAppTokenManager } from "./github-app-token-manager.js";
+import {
+  FileWriter,
+  ManifestManager,
+  BranchManager,
+  type IFileWriter,
+  type IManifestManager,
+  type IBranchManager,
+} from "./sync/index.js";
 
 export interface IRepositoryProcessor {
   process(
@@ -56,23 +48,6 @@ export interface IRepositoryProcessor {
     options: ProcessorOptions,
     manifestUpdate: { rulesets: string[] }
   ): Promise<ProcessorResult>;
-}
-
-/**
- * Determines if a file should be marked as executable.
- * .sh files are auto-executable unless explicit executable: false is set.
- * Non-.sh files are executable only if executable: true is explicitly set.
- */
-function shouldBeExecutable(file: FileContent): boolean {
-  const isShellScript = file.fileName.endsWith(".sh");
-
-  if (file.executable !== undefined) {
-    // Explicit setting takes precedence
-    return file.executable;
-  }
-
-  // Default: .sh files are executable, others are not
-  return isShellScript;
 }
 
 export interface ProcessorOptions {
@@ -121,17 +96,32 @@ export class RepositoryProcessor implements IRepositoryProcessor {
   private retries: number = 3;
   private executor: ICommandExecutor = defaultExecutor;
   private readonly tokenManager: GitHubAppTokenManager | null;
+  private readonly fileWriter: IFileWriter;
+  private readonly manifestManager: IManifestManager;
+  private readonly branchManager: IBranchManager;
 
   /**
    * Creates a new RepositoryProcessor.
    * @param gitOpsFactory - Optional factory for creating AuthenticatedGitOps instances (for testing)
    * @param log - Optional logger instance (for testing)
+   * @param components - Optional component injections (for testing)
    */
-  constructor(gitOpsFactory?: GitOpsFactory, log?: ILogger) {
+  constructor(
+    gitOpsFactory?: GitOpsFactory,
+    log?: ILogger,
+    components?: {
+      fileWriter?: IFileWriter;
+      manifestManager?: IManifestManager;
+      branchManager?: IBranchManager;
+    }
+  ) {
     this.gitOpsFactory =
       gitOpsFactory ??
       ((opts, auth) => new AuthenticatedGitOps(new GitOps(opts), auth));
     this.log = log ?? logger;
+    this.fileWriter = components?.fileWriter ?? new FileWriter();
+    this.manifestManager = components?.manifestManager ?? new ManifestManager();
+    this.branchManager = components?.branchManager ?? new BranchManager();
 
     // Initialize GitHub App token manager if credentials are configured
     if (hasGitHubAppCredentials()) {
@@ -215,151 +205,43 @@ export class RepositoryProcessor implements IRepositoryProcessor {
         `Default branch: ${baseBranch} (detected via ${detectionMethod})`
       );
 
-      // Step 3.5: Close existing PR if exists (fresh start approach)
-      // This ensures isolated sync attempts - each run starts from clean state
-      // Skip for direct mode - no PR involved
-      if (!dryRun && !isDirectMode) {
-        this.log.info("Checking for existing PR...");
-        const strategy = getPRStrategy(repoInfo, this.executor);
-        const closed = await strategy.closeExistingPR({
-          repoInfo,
-          branchName,
-          baseBranch,
-          workDir,
-          retries: this.retries,
-          token,
-        });
-        if (closed) {
-          this.log.info("Closed existing PR and deleted branch for fresh sync");
-          // Prune stale remote tracking refs so --force-with-lease works correctly
-          // The remote branch was deleted but local git still has tracking info
-          await this.gitOps.fetch({ prune: true });
-        }
-      }
+      // Step 3.5 & 4: Setup branch using BranchManager
+      await this.branchManager.setupBranch({
+        repoInfo,
+        branchName,
+        baseBranch,
+        workDir,
+        isDirectMode,
+        dryRun: dryRun ?? false,
+        retries: this.retries,
+        token,
+        gitOps: this.gitOps!,
+        log: this.log,
+        executor: this.executor,
+      });
 
-      // Step 4: Create branch (always fresh from base branch)
-      // Skip for direct mode - stay on default branch
-      if (!isDirectMode) {
-        this.log.info(`Creating branch: ${branchName}`);
-        await this.gitOps.createBranch(branchName);
-      } else {
-        this.log.info(`Direct mode: staying on ${baseBranch}`);
-      }
-
-      // Step 5: Write all config files and track changes
-      //
-      // DESIGN NOTE: Change detection differs between dry-run and normal mode:
-      // - Dry-run: Uses wouldChange() for read-only content comparison (no side effects)
-      // - Normal: Uses git status after writing (source of truth for what git will commit)
-      //
-      // Track all file changes with content and action - single source of truth
-      // Used for both commit message generation and actual commit
-      const fileChangesForCommit = new Map<
-        string,
-        {
-          content: string | null;
-          action: "create" | "update" | "delete" | "skip";
-        }
-      >();
-      const diffStats: DiffStats = createDiffStats();
-
-      for (const file of repoConfig.files) {
-        const filePath = join(workDir, file.fileName);
-        const fileExistsLocal = existsSync(filePath);
-
-        // Handle createOnly - check against BASE branch, not current working directory
-        // This ensures consistent behavior: createOnly means "only create if doesn't exist on main"
-        if (file.createOnly) {
-          const existsOnBase = await this.gitOps.fileExistsOnBranch(
-            file.fileName,
-            baseBranch
-          );
-          if (existsOnBase) {
-            this.log.info(
-              `Skipping ${file.fileName} (createOnly: exists on ${baseBranch})`
-            );
-            fileChangesForCommit.set(file.fileName, {
-              content: null,
-              action: "skip",
-            });
-            continue;
-          }
-        }
-
-        this.log.info(`Writing ${file.fileName}...`);
-
-        // Apply xfg templating if enabled
-        let contentToWrite: ContentValue | null = file.content;
-        if (file.template && contentToWrite !== null) {
-          contentToWrite = interpolateXfgContent(
-            contentToWrite,
-            {
-              repoInfo,
-              fileName: file.fileName,
-              vars: file.vars,
-            },
-            { strict: true }
-          );
-        }
-
-        const fileContent = convertContentToString(
-          contentToWrite,
-          file.fileName,
+      // Step 5: Write all config files using FileWriter
+      const { fileChanges: fileWriteResults, diffStats } =
+        await this.fileWriter.writeFiles(
+          repoConfig.files,
           {
-            header: file.header,
-            schemaUrl: file.schemaUrl,
+            repoInfo,
+            baseBranch,
+            workDir,
+            dryRun: dryRun ?? false,
+            noDelete: options.noDelete ?? false,
+            configId: options.configId,
+          },
+          {
+            gitOps: this.gitOps!,
+            log: this.log,
           }
         );
 
-        // Determine action type (create vs update) BEFORE writing
-        const action: "create" | "update" = fileExistsLocal
-          ? "update"
-          : "create";
+      // Use FileWriter results directly as the source of truth
+      const fileChangesForCommit = fileWriteResults;
 
-        // Check if file would change (needed for both modes)
-        const existingContent = this.gitOps.getFileContent(file.fileName);
-        const changed = this.gitOps.wouldChange(file.fileName, fileContent);
-
-        if (changed) {
-          // Track in single source of truth
-          fileChangesForCommit.set(file.fileName, {
-            content: fileContent,
-            action,
-          });
-        }
-
-        if (dryRun) {
-          // In dry-run, show diff but don't write
-          const status = getFileStatus(existingContent !== null, changed);
-          incrementDiffStats(diffStats, status);
-
-          const diffLines = generateDiff(
-            existingContent,
-            fileContent,
-            file.fileName
-          );
-          this.log.fileDiff(file.fileName, status, diffLines);
-        } else {
-          // Write the file
-          this.gitOps.writeFile(file.fileName, fileContent);
-        }
-      }
-
-      // Step 5b: Set executable permission for files that need it
-      for (const file of repoConfig.files) {
-        // Skip files that were excluded (createOnly + exists)
-        const tracked = fileChangesForCommit.get(file.fileName);
-        if (tracked?.action === "skip") {
-          continue;
-        }
-
-        if (shouldBeExecutable(file)) {
-          this.log.info(`Setting executable: ${file.fileName}`);
-          await this.gitOps!.setExecutable(file.fileName);
-        }
-      }
-
-      // Step 5c: Handle orphaned file deletion (manifest-based tracking)
+      // Step 5c: Handle orphaned file deletion using ManifestManager
       const existingManifest = loadManifest(workDir);
 
       // Build map of files with their deleteOrphaned setting
@@ -370,62 +252,42 @@ export class RepositoryProcessor implements IRepositoryProcessor {
         filesWithDeleteOrphaned.set(file.fileName, file.deleteOrphaned);
       }
 
-      // Update manifest and get list of files to delete
-      const { manifest: newManifest, filesToDelete } = updateManifest(
-        existingManifest,
-        options.configId,
-        filesWithDeleteOrphaned
+      // Process manifest and get orphans
+      const { manifest: newManifest, filesToDelete } =
+        this.manifestManager.processOrphans(
+          workDir,
+          options.configId,
+          filesWithDeleteOrphaned
+        );
+
+      // Delete orphaned files
+      await this.manifestManager.deleteOrphans(
+        filesToDelete,
+        { dryRun: dryRun ?? false, noDelete: options.noDelete ?? false },
+        {
+          gitOps: this.gitOps!,
+          log: this.log,
+          fileChanges: fileChangesForCommit,
+        }
       );
 
-      // Delete orphaned files (unless --no-delete flag is set)
-      if (filesToDelete.length > 0 && !options.noDelete) {
+      // Increment diff stats for deletions in dry-run mode
+      if (dryRun && filesToDelete.length > 0 && !options.noDelete) {
         for (const fileName of filesToDelete) {
-          // Only delete if file actually exists in the working directory
           if (this.gitOps!.fileExists(fileName)) {
-            // Track deletion in single source of truth
-            fileChangesForCommit.set(fileName, {
-              content: null,
-              action: "delete",
-            });
-
-            if (dryRun) {
-              // In dry-run, show what would be deleted
-              this.log.fileDiff(fileName, "DELETED", []);
-              incrementDiffStats(diffStats, "DELETED");
-            } else {
-              this.log.info(`Deleting orphaned file: ${fileName}`);
-              this.gitOps!.deleteFile(fileName);
-            }
+            incrementDiffStats(diffStats, "DELETED");
           }
         }
-      } else if (filesToDelete.length > 0 && options.noDelete) {
-        this.log.info(
-          `Skipping deletion of ${filesToDelete.length} orphaned file(s) (--no-delete flag)`
-        );
       }
 
-      // Save updated manifest (tracks files with deleteOrphaned: true)
-      // Only save if there are managed files for any config, or if we had a previous manifest
-      const hasAnyManagedFiles = Object.keys(newManifest.configs).length > 0;
-      if (hasAnyManagedFiles || existingManifest !== null) {
-        // Track manifest file as changed if it would be different
-        const existingConfigs = existingManifest?.configs ?? {};
-        const manifestChanged =
-          JSON.stringify(existingConfigs) !==
-          JSON.stringify(newManifest.configs);
-        if (manifestChanged) {
-          const manifestExisted = existsSync(join(workDir, MANIFEST_FILENAME));
-          const manifestContent = JSON.stringify(newManifest, null, 2) + "\n";
-          fileChangesForCommit.set(MANIFEST_FILENAME, {
-            content: manifestContent,
-            action: manifestExisted ? "update" : "create",
-          });
-        }
-
-        if (!dryRun) {
-          saveManifest(workDir, newManifest);
-        }
-      }
+      // Save updated manifest
+      this.manifestManager.saveUpdatedManifest(
+        workDir,
+        newManifest,
+        existingManifest,
+        dryRun ?? false,
+        fileChangesForCommit
+      );
 
       // Show diff summary in dry-run mode
       if (dryRun) {
@@ -742,23 +604,20 @@ export class RepositoryProcessor implements IRepositoryProcessor {
         };
       }
 
-      // Prepare branch for commit
-      if (!isDirectMode) {
-        const strategy = getPRStrategy(repoInfo, this.executor);
-        if (
-          await strategy.closeExistingPR({
-            repoInfo,
-            branchName,
-            baseBranch,
-            workDir,
-            retries: this.retries,
-            token,
-          })
-        ) {
-          await this.gitOps.fetch({ prune: true });
-        }
-        await this.gitOps.createBranch(branchName);
-      }
+      // Prepare branch for commit using BranchManager
+      await this.branchManager.setupBranch({
+        repoInfo,
+        branchName,
+        baseBranch,
+        workDir,
+        isDirectMode,
+        dryRun: false, // Already handled above
+        retries: this.retries,
+        token,
+        gitOps: this.gitOps!,
+        log: this.log,
+        executor: this.executor,
+      });
 
       // Save manifest and commit
       saveManifest(workDir, newManifest);

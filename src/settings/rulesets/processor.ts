@@ -7,11 +7,11 @@ import {
 import {
   GitHubRulesetStrategy,
   type GitHubRuleset,
-} from "../../strategies/github-ruleset-strategy.js";
+} from "./github-ruleset-strategy.js";
 import { diffRulesets } from "./diff.js";
 import { formatRulesetPlan, RulesetPlanResult } from "./formatter.js";
-import { hasGitHubAppCredentials } from "../../strategies/index.js";
-import { GitHubAppTokenManager } from "../../git/github-app-token-manager.js";
+import { hasGitHubAppCredentials } from "../../vcs/index.js";
+import { GitHubAppTokenManager } from "../../vcs/github-app-token-manager.js";
 
 // =============================================================================
 // Interfaces

@@ -9,8 +9,8 @@ import {
 } from "../../src/sync/repository-processor.js";
 import { RepoConfig } from "../../src/config/index.js";
 import { GitHubRepoInfo } from "../../src/shared/repo-detector.js";
-import { GitOps } from "../../src/git/git-ops.js";
-import { AuthenticatedGitOps } from "../../src/git/authenticated-git-ops.js";
+import { GitOps } from "../../src/vcs/git-ops.js";
+import { AuthenticatedGitOps } from "../../src/vcs/authenticated-git-ops.js";
 import { ICommandExecutor } from "../../src/shared/command-executor.js";
 import {
   createMockLogger,
@@ -2295,7 +2295,7 @@ describe("RepositoryProcessor", () => {
     test("hasGitHubAppCredentials returns true when both env vars are set", async () => {
       // Import the function directly for testing
       const { hasGitHubAppCredentials } =
-        await import("../../src/strategies/commit-strategy-selector.js");
+        await import("../../src/vcs/commit-strategy-selector.js");
 
       // Initially should be false (env vars cleared in beforeEach)
       assert.equal(

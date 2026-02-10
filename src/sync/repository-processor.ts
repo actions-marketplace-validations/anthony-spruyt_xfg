@@ -5,19 +5,16 @@ import {
   isGitHubRepo,
   GitHubRepoInfo,
 } from "../shared/repo-detector.js";
-import { GitOps, GitOpsOptions } from "../git/git-ops.js";
+import { GitOps, GitOpsOptions } from "../vcs/git-ops.js";
 import {
   AuthenticatedGitOps,
   IAuthenticatedGitOps,
   GitAuthOptions,
-} from "../git/authenticated-git-ops.js";
-import { createPR, mergePR, PRResult, FileAction } from "../git/pr-creator.js";
+} from "../vcs/authenticated-git-ops.js";
+import { createPR, mergePR, PRResult, FileAction } from "../vcs/pr-creator.js";
 import { logger, ILogger } from "../shared/logger.js";
-import {
-  getCommitStrategy,
-  hasGitHubAppCredentials,
-} from "../strategies/index.js";
-import type { PRMergeConfig, FileChange } from "../strategies/index.js";
+import { getCommitStrategy, hasGitHubAppCredentials } from "../vcs/index.js";
+import type { PRMergeConfig, FileChange } from "../vcs/index.js";
 import {
   ICommandExecutor,
   defaultExecutor,
@@ -29,7 +26,7 @@ import {
   updateManifestRulesets,
   MANIFEST_FILENAME,
 } from "./manifest.js";
-import { GitHubAppTokenManager } from "../git/github-app-token-manager.js";
+import { GitHubAppTokenManager } from "../vcs/github-app-token-manager.js";
 import {
   FileWriter,
   ManifestManager,

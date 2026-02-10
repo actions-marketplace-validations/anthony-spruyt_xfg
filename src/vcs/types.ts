@@ -1,10 +1,11 @@
-import { PRResult } from "../git/pr-creator.js";
-import { RepoInfo } from "../shared/repo-detector.js";
-import {
-  ICommandExecutor,
-  defaultExecutor,
-} from "../shared/command-executor.js";
+import type { PRResult } from "./pr-creator.js";
+import type { RepoInfo } from "../shared/repo-detector.js";
 import type { MergeMode, MergeStrategy } from "../config/index.js";
+import type { IAuthenticatedGitOps } from "./authenticated-git-ops.js";
+
+// =============================================================================
+// PR Strategy Types
+// =============================================================================
 
 export interface PRMergeConfig {
   mode: MergeMode;
@@ -93,67 +94,44 @@ export interface IPRStrategy {
   execute(options: PRStrategyOptions): Promise<PRResult>;
 }
 
-export abstract class BasePRStrategy implements IPRStrategy {
-  protected bodyFilePath: string = ".pr-body.md";
-  protected executor: ICommandExecutor;
+// =============================================================================
+// Commit Strategy Types
+// =============================================================================
 
-  constructor(executor?: ICommandExecutor) {
-    this.executor = executor ?? defaultExecutor;
-  }
+export interface FileChange {
+  path: string;
+  content: string | null; // null = deletion
+}
 
-  abstract checkExistingPR(options: PRStrategyOptions): Promise<string | null>;
-  abstract closeExistingPR(options: CloseExistingPROptions): Promise<boolean>;
-  abstract create(options: PRStrategyOptions): Promise<PRResult>;
-  abstract merge(options: MergeOptions): Promise<MergeResult>;
+export interface CommitOptions {
+  repoInfo: RepoInfo;
+  branchName: string;
+  message: string;
+  fileChanges: FileChange[];
+  workDir: string;
+  retries?: number;
+  /** Use force push (--force-with-lease). Default: true for PR branches, false for direct push to main. */
+  force?: boolean;
+  /** GitHub App installation token for authentication (used by GraphQLCommitStrategy) */
+  token?: string;
+  /** Authenticated git operations wrapper (used by GraphQLCommitStrategy for network ops) */
+  gitOps?: IAuthenticatedGitOps;
+}
 
-  /**
-   * Execute the full PR creation workflow:
-   * 1. Check for existing PR
-   * 2. If exists, return it
-   * 3. Otherwise, create new PR
-   *
-   * @deprecated Use PRWorkflowExecutor.execute() for better SRP
-   */
-  async execute(options: PRStrategyOptions): Promise<PRResult> {
-    const executor = new PRWorkflowExecutor(this);
-    return executor.execute(options);
-  }
+export interface CommitResult {
+  sha: string;
+  verified: boolean;
+  pushed: boolean;
 }
 
 /**
- * Orchestrates the PR creation workflow with error handling.
- * Follows Single Responsibility Principle by separating workflow orchestration
- * from platform-specific PR creation logic.
- *
- * Workflow:
- * 1. Check for existing PR on the branch
- * 2. If exists, return existing PR URL
- * 3. Otherwise, create new PR
- * 4. Handle errors and return failure result
+ * Strategy interface for creating commits.
+ * Implementations handle platform-specific commit mechanisms.
  */
-export class PRWorkflowExecutor {
-  constructor(private readonly strategy: IPRStrategy) {}
-
+export interface ICommitStrategy {
   /**
-   * Execute the full PR creation workflow with error handling.
+   * Create a commit with the given file changes and push to remote.
+   * @returns Commit result with SHA and verification status
    */
-  async execute(options: PRStrategyOptions): Promise<PRResult> {
-    try {
-      const existingUrl = await this.strategy.checkExistingPR(options);
-      if (existingUrl) {
-        return {
-          url: existingUrl,
-          success: true,
-          message: `PR already exists: ${existingUrl}`,
-        };
-      }
-      return await this.strategy.create(options);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        success: false,
-        message: `Failed to create PR: ${message}`,
-      };
-    }
-  }
+  commit(options: CommitOptions): Promise<CommitResult>;
 }

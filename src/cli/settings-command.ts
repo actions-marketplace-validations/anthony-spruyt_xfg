@@ -1,24 +1,24 @@
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 import chalk from "chalk";
-import { loadRawConfig, normalizeConfig } from "../config.js";
-import { validateForSettings } from "../config-validator.js";
+import { loadRawConfig, normalizeConfig } from "../config/index.js";
+import { validateForSettings } from "../config/validator.js";
 import {
   parseGitUrl,
   getRepoDisplayName,
   isGitHubRepo,
-} from "../repo-detector.js";
-import { logger } from "../logger.js";
-import { generateWorkspaceName } from "../workspace-utils.js";
-import { RepoResult } from "../github-summary.js";
-import { buildErrorResult } from "../summary-utils.js";
-import { getManagedRulesets } from "../manifest.js";
-import { Plan, printPlan } from "../plan-formatter.js";
-import { writePlanSummary } from "../plan-summary.js";
+} from "../shared/repo-detector.js";
+import { logger } from "../shared/logger.js";
+import { generateWorkspaceName } from "../shared/workspace-utils.js";
+import { RepoResult } from "../output/github-summary.js";
+import { buildErrorResult } from "../output/summary-utils.js";
+import { getManagedRulesets } from "../sync/manifest.js";
+import { Plan, printPlan } from "../output/plan-formatter.js";
+import { writePlanSummary } from "../output/plan-summary.js";
 import {
   rulesetResultToResources,
   repoSettingsResultToResources,
-} from "../resource-converters.js";
+} from "../settings/resource-converters.js";
 import { SharedOptions } from "./sync-command.js";
 import {
   ProcessorFactory,

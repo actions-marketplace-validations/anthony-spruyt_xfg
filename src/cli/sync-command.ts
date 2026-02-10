@@ -6,18 +6,18 @@ import {
   MergeMode,
   MergeStrategy,
   RepoConfig,
-} from "../config.js";
-import { validateForSync } from "../config-validator.js";
-import { parseGitUrl, getRepoDisplayName } from "../repo-detector.js";
-import { sanitizeBranchName, validateBranchName } from "../git-ops.js";
-import { logger } from "../logger.js";
-import { generateWorkspaceName } from "../workspace-utils.js";
-import { RepoInfo } from "../repo-detector.js";
-import { RepoResult } from "../github-summary.js";
-import { buildRepoResult, buildErrorResult } from "../summary-utils.js";
-import { Plan, printPlan } from "../plan-formatter.js";
-import { writePlanSummary } from "../plan-summary.js";
-import { syncResultToResources } from "../resource-converters.js";
+} from "../config/index.js";
+import { validateForSync } from "../config/validator.js";
+import { parseGitUrl, getRepoDisplayName } from "../shared/repo-detector.js";
+import { sanitizeBranchName, validateBranchName } from "../git/git-ops.js";
+import { logger } from "../shared/logger.js";
+import { generateWorkspaceName } from "../shared/workspace-utils.js";
+import { RepoInfo } from "../shared/repo-detector.js";
+import { RepoResult } from "../output/github-summary.js";
+import { buildRepoResult, buildErrorResult } from "../output/summary-utils.js";
+import { Plan, printPlan } from "../output/plan-formatter.js";
+import { writePlanSummary } from "../output/plan-summary.js";
+import { syncResultToResources } from "../settings/resource-converters.js";
 import { ProcessorFactory, defaultProcessorFactory } from "./types.js";
 
 /**

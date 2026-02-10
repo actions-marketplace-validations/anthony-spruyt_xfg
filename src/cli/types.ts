@@ -1,19 +1,19 @@
-import { RepoConfig } from "../config.js";
-import { RepoInfo } from "../repo-detector.js";
+import { RepoConfig } from "../config/index.js";
+import { RepoInfo } from "../shared/repo-detector.js";
 import {
   ProcessorResult,
   ProcessorOptions,
   RepositoryProcessor,
-} from "../repository-processor.js";
+} from "../sync/repository-processor.js";
 import {
   RulesetProcessor,
   RulesetProcessorOptions,
   RulesetProcessorResult,
-} from "../ruleset-processor.js";
+} from "../settings/rulesets/processor.js";
 import {
   RepoSettingsProcessor,
   type IRepoSettingsProcessor,
-} from "../repo-settings-processor.js";
+} from "../settings/repo-settings/processor.js";
 
 /**
  * Processor interface for dependency injection in tests.

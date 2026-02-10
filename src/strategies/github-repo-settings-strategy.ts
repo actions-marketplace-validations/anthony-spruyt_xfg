@@ -1,7 +1,14 @@
-import { ICommandExecutor, defaultExecutor } from "../command-executor.js";
-import { isGitHubRepo, GitHubRepoInfo, RepoInfo } from "../repo-detector.js";
-import { escapeShellArg } from "../shell-utils.js";
-import type { GitHubRepoSettings } from "../config.js";
+import {
+  ICommandExecutor,
+  defaultExecutor,
+} from "../shared/command-executor.js";
+import {
+  isGitHubRepo,
+  GitHubRepoInfo,
+  RepoInfo,
+} from "../shared/repo-detector.js";
+import { escapeShellArg } from "../shared/shell-utils.js";
+import type { GitHubRepoSettings } from "../config/index.js";
 import type {
   IRepoSettingsStrategy,
   RepoSettingsStrategyOptions,

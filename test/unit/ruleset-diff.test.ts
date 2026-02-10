@@ -6,8 +6,8 @@ import {
   formatDiff,
   projectToDesiredShape,
   normalizeRuleset,
-} from "../../src/ruleset-diff.js";
-import type { Ruleset } from "../../src/config.js";
+} from "../../src/settings/rulesets/diff.js";
+import type { Ruleset } from "../../src/config/index.js";
 import type { GitHubRuleset } from "../../src/strategies/github-ruleset-strategy.js";
 
 describe("diffRulesets", () => {

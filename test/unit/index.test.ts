@@ -856,9 +856,9 @@ import {
   toFileChanges,
   buildRepoResult,
   buildErrorResult,
-} from "../../src/summary-utils.js";
-import { ProcessorResult } from "../../src/repository-processor.js";
-import { RepoConfig } from "../../src/config.js";
+} from "../../src/output/summary-utils.js";
+import { ProcessorResult } from "../../src/sync/repository-processor.js";
+import { RepoConfig } from "../../src/config/index.js";
 
 describe("getMergeOutcome", () => {
   test("returns undefined for failed result", () => {

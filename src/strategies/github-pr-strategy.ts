@@ -1,8 +1,8 @@
 import { existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { escapeShellArg } from "../shell-utils.js";
-import { isGitHubRepo, GitHubRepoInfo } from "../repo-detector.js";
-import { PRResult } from "../pr-creator.js";
+import { escapeShellArg } from "../shared/shell-utils.js";
+import { isGitHubRepo, GitHubRepoInfo } from "../shared/repo-detector.js";
+import { PRResult } from "../git/pr-creator.js";
 import {
   BasePRStrategy,
   PRStrategyOptions,
@@ -10,10 +10,10 @@ import {
   MergeOptions,
   MergeResult,
 } from "./pr-strategy.js";
-import { logger } from "../logger.js";
-import { withRetry, isPermanentError } from "../retry-utils.js";
-import { sanitizeCredentials } from "../sanitize-utils.js";
-import type { MergeStrategy } from "../config.js";
+import { logger } from "../shared/logger.js";
+import { withRetry, isPermanentError } from "../shared/retry-utils.js";
+import { sanitizeCredentials } from "../shared/sanitize-utils.js";
+import type { MergeStrategy } from "../config/index.js";
 
 /**
  * Get the repo flag value for gh CLI commands.

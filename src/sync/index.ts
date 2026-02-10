@@ -4,6 +4,9 @@ export { BranchManager } from "./branch-manager.js";
 export { AuthOptionsBuilder } from "./auth-options-builder.js";
 export { RepositorySession } from "./repository-session.js";
 export { CommitPushManager } from "./commit-push-manager.js";
+export { formatCommitMessage } from "./commit-message.js";
+export { FileSyncOrchestrator } from "./file-sync-orchestrator.js";
+export { PRMergeHandler } from "./pr-merge-handler.js";
 export type {
   IFileWriter,
   FileWriteContext,
@@ -28,6 +31,10 @@ export type {
   IRepositoryProcessor,
   ProcessorOptions,
   ProcessorResult,
+  IFileSyncOrchestrator,
+  FileSyncResult,
+  IPRMergeHandler,
+  PRHandlerOptions,
 } from "./types.js";
 
 // Repository processor

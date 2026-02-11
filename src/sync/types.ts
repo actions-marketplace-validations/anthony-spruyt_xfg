@@ -280,6 +280,14 @@ export interface ProcessorOptions {
 }
 
 /**
+ * Detail of a single file change for reporting
+ */
+export interface FileChangeDetail {
+  path: string;
+  action: "create" | "update" | "delete";
+}
+
+/**
  * Result of repository processing
  */
 export interface ProcessorResult {
@@ -294,6 +302,7 @@ export interface ProcessorResult {
     message: string;
   };
   diffStats?: DiffStats;
+  fileChanges?: FileChangeDetail[];
 }
 
 /**
@@ -366,6 +375,7 @@ export interface IPRMergeHandler {
     options: PRHandlerOptions,
     changedFiles: FileAction[],
     repoName: string,
-    diffStats?: DiffStats
+    diffStats?: DiffStats,
+    fileChanges?: FileChangeDetail[]
   ): Promise<ProcessorResult>;
 }

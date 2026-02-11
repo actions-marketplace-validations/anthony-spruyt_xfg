@@ -1,0 +1,546 @@
+import { test, describe, beforeEach, afterEach } from "node:test";
+import { strict as assert } from "node:assert";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  formatSettingsReportCLI,
+  formatSettingsReportMarkdown,
+  writeSettingsReportSummary,
+  type SettingsReport,
+  type RepoChanges,
+  type SettingChange,
+  type RulesetChange,
+} from "../../src/output/settings-report.js";
+
+describe("settings-report types", () => {
+  test("SettingsReport structure is correct", () => {
+    const report: SettingsReport = {
+      repos: [],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+    assert.ok(report);
+  });
+
+  test("RepoChanges structure is correct", () => {
+    const repoChanges: RepoChanges = {
+      repoName: "org/repo",
+      settings: [],
+      rulesets: [],
+    };
+    assert.ok(repoChanges);
+  });
+
+  test("SettingChange structure is correct", () => {
+    const change: SettingChange = {
+      name: "deleteBranchOnMerge",
+      action: "change",
+      oldValue: false,
+      newValue: true,
+    };
+    assert.ok(change);
+  });
+
+  test("RulesetChange structure is correct", () => {
+    const change: RulesetChange = {
+      name: "branch-protection",
+      action: "update",
+      propertyDiffs: [],
+    };
+    assert.ok(change);
+  });
+});
+
+describe("formatSettingsReportCLI", () => {
+  test("renders repo with settings changes only", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 1 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(output.includes("org/repo"), "should include repo name");
+    assert.ok(
+      output.includes("deleteBranchOnMerge"),
+      "should include setting name"
+    );
+    assert.ok(output.includes("false"), "should include old value");
+    assert.ok(output.includes("true"), "should include new value");
+    assert.ok(output.includes("1 setting"), "should include summary");
+  });
+
+  test("renders setting add action", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "hasWiki",
+              action: "add",
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 1, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(output.includes("hasWiki"), "should include setting name");
+    assert.ok(output.includes("true"), "should include new value");
+  });
+
+  test("renders empty report as no changes", () => {
+    const report: SettingsReport = {
+      repos: [],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(output.includes("No changes"), "should show no changes message");
+  });
+
+  test("renders multiple repos with blank lines between", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo1",
+          settings: [{ name: "hasWiki", action: "add", newValue: true }],
+          rulesets: [],
+        },
+        {
+          repoName: "org/repo2",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 1, change: 1 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(output.includes("org/repo1"), "should include first repo");
+    assert.ok(output.includes("org/repo2"), "should include second repo");
+    // Verify blank line between repos (repo1 content, blank, repo2 header)
+    const repo1Index = lines.findIndex((l) => l.includes("org/repo1"));
+    const repo2Index = lines.findIndex((l) => l.includes("org/repo2"));
+    assert.ok(
+      repo2Index > repo1Index + 2,
+      "should have separation between repos"
+    );
+  });
+
+  test("renders repo with error", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/failed-repo",
+          settings: [],
+          rulesets: [],
+          error: "Connection refused",
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(output.includes("org/failed-repo"), "should include repo name");
+    assert.ok(output.includes("Error:"), "should show error label");
+    assert.ok(
+      output.includes("Connection refused"),
+      "should show error message"
+    );
+  });
+
+  test("renders ruleset create with full config tree", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [],
+          rulesets: [
+            {
+              name: "ci-bypass",
+              action: "create",
+              config: {
+                name: "ci-bypass",
+                target: "branch",
+                enforcement: "active",
+                conditions: {
+                  ref_name: {
+                    include: ["refs/heads/main"],
+                    exclude: [],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 1, update: 0, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(
+      output.includes('ruleset "ci-bypass"'),
+      "should include ruleset name in header"
+    );
+    assert.ok(output.includes("enforcement"), "should include properties");
+    assert.ok(output.includes("active"), "should include property values");
+    // Verify "name" is NOT in tree output (it's in the header, not duplicated in tree)
+    const treeLines = lines.filter((l) => l.includes("+ name:"));
+    assert.equal(
+      treeLines.length,
+      0,
+      "should not include 'name' property in tree (it's in header)"
+    );
+  });
+
+  test("renders ruleset update with property diffs", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [],
+          rulesets: [
+            {
+              name: "branch-protection",
+              action: "update",
+              propertyDiffs: [
+                {
+                  path: ["enforcement"],
+                  action: "change",
+                  oldValue: "active",
+                  newValue: "evaluate",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 1, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(
+      output.includes('ruleset "branch-protection"'),
+      "should include ruleset name"
+    );
+    assert.ok(
+      output.includes("enforcement"),
+      "should include changed property"
+    );
+    assert.ok(output.includes("active"), "should include old value");
+    assert.ok(output.includes("evaluate"), "should include new value");
+  });
+
+  test("renders ruleset delete", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [],
+          rulesets: [
+            {
+              name: "old-ruleset",
+              action: "delete",
+            },
+          ],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 1 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(
+      output.includes('ruleset "old-ruleset"'),
+      "should include ruleset name"
+    );
+  });
+
+  test("renders mixed settings and rulesets", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [
+            {
+              name: "branch-protection",
+              action: "update",
+              propertyDiffs: [
+                {
+                  path: ["enforcement"],
+                  action: "change",
+                  oldValue: "active",
+                  newValue: "evaluate",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 1 },
+        rulesets: { create: 0, update: 1, delete: 0 },
+      },
+    };
+
+    const lines = formatSettingsReportCLI(report);
+    const output = lines.join("\n");
+
+    assert.ok(output.includes("deleteBranchOnMerge"), "should include setting");
+    assert.ok(output.includes("branch-protection"), "should include ruleset");
+  });
+});
+
+describe("formatSettingsReportMarkdown", () => {
+  test("includes dry run warning when dryRun=true", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 1 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const markdown = formatSettingsReportMarkdown(report, true);
+
+    assert.ok(
+      markdown.includes("(Dry Run)"),
+      "should include dry run in title"
+    );
+    assert.ok(
+      markdown.includes("[!WARNING]"),
+      "should include warning callout"
+    );
+    assert.ok(
+      markdown.includes("no changes were applied"),
+      "should explain dry run"
+    );
+  });
+
+  test("wraps output in diff code block", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 1 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const markdown = formatSettingsReportMarkdown(report, false);
+
+    assert.ok(markdown.includes("```diff"), "should have diff code block");
+    assert.ok(markdown.includes("org/repo"), "should include repo name");
+    assert.ok(
+      markdown.includes("deleteBranchOnMerge"),
+      "should include setting"
+    );
+  });
+
+  test("includes plan summary as bold text", () => {
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 1 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const markdown = formatSettingsReportMarkdown(report, false);
+
+    assert.ok(markdown.includes("**Plan:"), "should have bold plan summary");
+  });
+
+  test("no dry run warning when dryRun=false", () => {
+    const report: SettingsReport = {
+      repos: [],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    const markdown = formatSettingsReportMarkdown(report, false);
+
+    assert.ok(!markdown.includes("[!WARNING]"), "should not include warning");
+    assert.ok(!markdown.includes("Dry Run"), "should not mention dry run");
+  });
+});
+
+describe("writeSettingsReportSummary", () => {
+  let tempFile: string;
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    tempFile = join(tmpdir(), `settings-report-test-${Date.now()}.md`);
+    originalEnv = process.env.GITHUB_STEP_SUMMARY;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.GITHUB_STEP_SUMMARY;
+    } else {
+      process.env.GITHUB_STEP_SUMMARY = originalEnv;
+    }
+    if (existsSync(tempFile)) {
+      unlinkSync(tempFile);
+    }
+  });
+
+  test("writes markdown to GITHUB_STEP_SUMMARY path", () => {
+    process.env.GITHUB_STEP_SUMMARY = tempFile;
+    const report: SettingsReport = {
+      repos: [
+        {
+          repoName: "org/repo",
+          settings: [
+            {
+              name: "deleteBranchOnMerge",
+              action: "change",
+              oldValue: false,
+              newValue: true,
+            },
+          ],
+          rulesets: [],
+        },
+      ],
+      totals: {
+        settings: { add: 0, change: 1 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    writeSettingsReportSummary(report, false);
+
+    assert.ok(existsSync(tempFile));
+    const content = readFileSync(tempFile, "utf-8");
+    assert.ok(content.includes("Repository Settings Summary"));
+  });
+
+  test("no-ops when env var not set", () => {
+    delete process.env.GITHUB_STEP_SUMMARY;
+    const report: SettingsReport = {
+      repos: [],
+      totals: {
+        settings: { add: 0, change: 0 },
+        rulesets: { create: 0, update: 0, delete: 0 },
+      },
+    };
+
+    writeSettingsReportSummary(report, false);
+
+    assert.ok(!existsSync(tempFile));
+  });
+});

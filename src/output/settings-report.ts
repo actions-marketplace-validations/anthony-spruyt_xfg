@@ -1,0 +1,362 @@
+import { appendFileSync } from "node:fs";
+import chalk from "chalk";
+import {
+  formatPropertyTree,
+  type PropertyDiff,
+} from "../settings/rulesets/formatter.js";
+import type { Ruleset } from "../config/index.js";
+
+export interface SettingsReport {
+  repos: RepoChanges[];
+  totals: {
+    settings: { add: number; change: number };
+    rulesets: { create: number; update: number; delete: number };
+  };
+}
+
+export interface RepoChanges {
+  repoName: string;
+  settings: SettingChange[];
+  rulesets: RulesetChange[];
+  error?: string;
+}
+
+export interface SettingChange {
+  name: string;
+  action: "add" | "change";
+  oldValue?: unknown;
+  newValue: unknown;
+}
+
+export interface RulesetChange {
+  name: string;
+  action: "create" | "update" | "delete";
+  propertyDiffs?: PropertyDiff[];
+  config?: Ruleset;
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function formatValue(val: unknown): string {
+  if (val === null) return "null";
+  if (val === undefined) return "undefined";
+  if (typeof val === "string") return `"${val}"`;
+  if (typeof val === "boolean") return val ? "true" : "false";
+  return String(val);
+}
+
+function formatRulesetConfig(config: Ruleset, indent: number): string[] {
+  const lines: string[] = [];
+
+  function renderValue(
+    key: string,
+    value: unknown,
+    currentIndent: number
+  ): void {
+    const pad = "    ".repeat(currentIndent);
+    if (value === null || value === undefined) return;
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        lines.push(chalk.green(`${pad}+ ${key}: []`));
+      } else if (value.every((v) => typeof v !== "object")) {
+        lines.push(
+          chalk.green(
+            `${pad}+ ${key}: [${value.map((v) => (typeof v === "string" ? `"${v}"` : String(v))).join(", ")}]`
+          )
+        );
+      } else {
+        lines.push(chalk.green(`${pad}+ ${key}:`));
+        for (const item of value) {
+          if (typeof item === "object" && item !== null) {
+            lines.push(chalk.green(`${pad}    + ${JSON.stringify(item)}`));
+          } else {
+            lines.push(chalk.green(`${pad}    + ${formatValue(item)}`));
+          }
+        }
+      }
+    } else if (typeof value === "object") {
+      lines.push(chalk.green(`${pad}+ ${key}:`));
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        renderValue(k, v, currentIndent + 1);
+      }
+    } else {
+      lines.push(chalk.green(`${pad}+ ${key}: ${formatValue(value)}`));
+    }
+  }
+
+  for (const [key, value] of Object.entries(config)) {
+    if (key === "name") continue; // Name is in the header
+    renderValue(key, value, indent);
+  }
+
+  return lines;
+}
+
+function formatSummary(totals: SettingsReport["totals"]): string {
+  const parts: string[] = [];
+  const settingsTotal = totals.settings.add + totals.settings.change;
+  const rulesetsTotal =
+    totals.rulesets.create + totals.rulesets.update + totals.rulesets.delete;
+
+  if (settingsTotal > 0) {
+    const settingWord = settingsTotal === 1 ? "setting" : "settings";
+    const actions: string[] = [];
+    if (totals.settings.add > 0) actions.push(`${totals.settings.add} to add`);
+    if (totals.settings.change > 0)
+      actions.push(`${totals.settings.change} to change`);
+    parts.push(`${settingsTotal} ${settingWord} (${actions.join(", ")})`);
+  }
+
+  if (rulesetsTotal > 0) {
+    const rulesetWord = rulesetsTotal === 1 ? "ruleset" : "rulesets";
+    const actions: string[] = [];
+    if (totals.rulesets.create > 0)
+      actions.push(`${totals.rulesets.create} to create`);
+    if (totals.rulesets.update > 0)
+      actions.push(`${totals.rulesets.update} to update`);
+    if (totals.rulesets.delete > 0)
+      actions.push(`${totals.rulesets.delete} to delete`);
+    parts.push(`${rulesetsTotal} ${rulesetWord} (${actions.join(", ")})`);
+  }
+
+  if (parts.length === 0) {
+    return "No changes";
+  }
+
+  return `Plan: ${parts.join(", ")}`;
+}
+
+// =============================================================================
+// CLI Formatter
+// =============================================================================
+
+export function formatSettingsReportCLI(report: SettingsReport): string[] {
+  const lines: string[] = [];
+
+  for (const repo of report.repos) {
+    if (
+      repo.settings.length === 0 &&
+      repo.rulesets.length === 0 &&
+      !repo.error
+    ) {
+      continue;
+    }
+
+    // Repo header
+    lines.push(chalk.yellow(`~ ${repo.repoName}`));
+
+    // Settings
+    for (const setting of repo.settings) {
+      if (setting.action === "add") {
+        lines.push(
+          chalk.green(`    + ${setting.name}: ${formatValue(setting.newValue)}`)
+        );
+      } else {
+        lines.push(
+          chalk.yellow(
+            `    ~ ${setting.name}: ${formatValue(setting.oldValue)} → ${formatValue(setting.newValue)}`
+          )
+        );
+      }
+    }
+
+    // Rulesets
+    for (const ruleset of repo.rulesets) {
+      if (ruleset.action === "create") {
+        lines.push(chalk.green(`    + ruleset "${ruleset.name}"`));
+        if (ruleset.config) {
+          lines.push(...formatRulesetConfig(ruleset.config, 2));
+        }
+      } else if (ruleset.action === "update") {
+        lines.push(chalk.yellow(`    ~ ruleset "${ruleset.name}"`));
+        if (ruleset.propertyDiffs && ruleset.propertyDiffs.length > 0) {
+          const treeLines = formatPropertyTree(ruleset.propertyDiffs);
+          for (const line of treeLines) {
+            lines.push(`        ${line}`);
+          }
+        }
+      } else if (ruleset.action === "delete") {
+        lines.push(chalk.red(`    - ruleset "${ruleset.name}"`));
+      }
+    }
+
+    // Error
+    if (repo.error) {
+      lines.push(chalk.red(`    Error: ${repo.error}`));
+    }
+
+    lines.push(""); // Blank line between repos
+  }
+
+  // Summary
+  lines.push(formatSummary(report.totals));
+
+  return lines;
+}
+
+// =============================================================================
+// Markdown Formatter
+// =============================================================================
+
+function formatValuePlain(val: unknown): string {
+  if (val === null) return "null";
+  if (val === undefined) return "undefined";
+  if (typeof val === "string") return `"${val}"`;
+  if (typeof val === "boolean") return val ? "true" : "false";
+  return String(val);
+}
+
+function formatRulesetConfigPlain(config: Ruleset, indent: number): string[] {
+  const lines: string[] = [];
+
+  function renderValue(
+    key: string,
+    value: unknown,
+    currentIndent: number
+  ): void {
+    const pad = "    ".repeat(currentIndent);
+    if (value === null || value === undefined) return;
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        lines.push(`${pad}+ ${key}: []`);
+      } else if (value.every((v) => typeof v !== "object")) {
+        lines.push(
+          `${pad}+ ${key}: [${value.map((v) => (typeof v === "string" ? `"${v}"` : String(v))).join(", ")}]`
+        );
+      } else {
+        lines.push(`${pad}+ ${key}:`);
+        for (const item of value) {
+          if (typeof item === "object" && item !== null) {
+            lines.push(`${pad}    + ${JSON.stringify(item)}`);
+          } else {
+            lines.push(`${pad}    + ${formatValuePlain(item)}`);
+          }
+        }
+      }
+    } else if (typeof value === "object") {
+      lines.push(`${pad}+ ${key}:`);
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        renderValue(k, v, currentIndent + 1);
+      }
+    } else {
+      lines.push(`${pad}+ ${key}: ${formatValuePlain(value)}`);
+    }
+  }
+
+  for (const [key, value] of Object.entries(config)) {
+    if (key === "name") continue;
+    renderValue(key, value, indent);
+  }
+
+  return lines;
+}
+
+export function formatSettingsReportMarkdown(
+  report: SettingsReport,
+  dryRun: boolean
+): string {
+  const lines: string[] = [];
+
+  // Title
+  const titleSuffix = dryRun ? " (Dry Run)" : "";
+  lines.push(`## Repository Settings Summary${titleSuffix}`);
+  lines.push("");
+
+  // Dry-run warning
+  if (dryRun) {
+    lines.push("> [!WARNING]");
+    lines.push("> This was a dry run — no changes were applied");
+    lines.push("");
+  }
+
+  // Diff block
+  const diffLines: string[] = [];
+
+  for (const repo of report.repos) {
+    if (
+      repo.settings.length === 0 &&
+      repo.rulesets.length === 0 &&
+      !repo.error
+    ) {
+      continue;
+    }
+
+    diffLines.push(`~ ${repo.repoName}`);
+
+    for (const setting of repo.settings) {
+      if (setting.action === "add") {
+        diffLines.push(
+          `    + ${setting.name}: ${formatValuePlain(setting.newValue)}`
+        );
+      } else {
+        diffLines.push(
+          `    ~ ${setting.name}: ${formatValuePlain(setting.oldValue)} → ${formatValuePlain(setting.newValue)}`
+        );
+      }
+    }
+
+    for (const ruleset of repo.rulesets) {
+      if (ruleset.action === "create") {
+        diffLines.push(`    + ruleset "${ruleset.name}"`);
+        if (ruleset.config) {
+          diffLines.push(...formatRulesetConfigPlain(ruleset.config, 2));
+        }
+      } else if (ruleset.action === "update") {
+        diffLines.push(`    ~ ruleset "${ruleset.name}"`);
+        if (ruleset.propertyDiffs && ruleset.propertyDiffs.length > 0) {
+          for (const diff of ruleset.propertyDiffs) {
+            const path = diff.path.join(".");
+            if (diff.action === "add") {
+              diffLines.push(
+                `        + ${path}: ${formatValuePlain(diff.newValue)}`
+              );
+            } else if (diff.action === "change") {
+              diffLines.push(
+                `        ~ ${path}: ${formatValuePlain(diff.oldValue)} → ${formatValuePlain(diff.newValue)}`
+              );
+            } else if (diff.action === "remove") {
+              diffLines.push(`        - ${path}`);
+            }
+          }
+        }
+      } else if (ruleset.action === "delete") {
+        diffLines.push(`    - ruleset "${ruleset.name}"`);
+      }
+    }
+
+    if (repo.error) {
+      diffLines.push(`    ! Error: ${repo.error}`);
+    }
+  }
+
+  if (diffLines.length > 0) {
+    lines.push("```diff");
+    lines.push(...diffLines);
+    lines.push("```");
+    lines.push("");
+  }
+
+  // Summary
+  lines.push(`**${formatSummary(report.totals)}**`);
+
+  return lines.join("\n");
+}
+
+// =============================================================================
+// File Writer
+// =============================================================================
+
+export function writeSettingsReportSummary(
+  report: SettingsReport,
+  dryRun: boolean
+): void {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath) return;
+
+  const markdown = formatSettingsReportMarkdown(report, dryRun);
+  appendFileSync(summaryPath, "\n" + markdown + "\n");
+}

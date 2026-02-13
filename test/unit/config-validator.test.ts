@@ -2549,6 +2549,209 @@ describe("hasActionableSettings", () => {
   });
 });
 
+describe("validateRawConfig - lifecycle fields", () => {
+  test("accepts upstream field on repo", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/forked-tool.git",
+          upstream: "git@github.com:opensource/cool-tool.git",
+        },
+      ],
+    };
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("accepts source field on repo", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/migrated-app.git",
+          source: "https://dev.azure.com/org/project/_git/legacy-app",
+        },
+      ],
+    };
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("rejects upstream and source together", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          upstream: "git@github.com:other/repo.git",
+          source: "https://dev.azure.com/org/project/_git/repo",
+        },
+      ],
+    };
+    assert.throws(
+      () => validateRawConfig(config),
+      /upstream.*source.*mutually exclusive/i
+    );
+  });
+
+  test("rejects invalid upstream URL", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          upstream: "not-a-valid-url",
+        },
+      ],
+    };
+    assert.throws(() => validateRawConfig(config), /upstream.*valid git URL/i);
+  });
+
+  test("rejects invalid source URL", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          source: "not-a-valid-url",
+        },
+      ],
+    };
+    assert.throws(() => validateRawConfig(config), /source.*valid git URL/i);
+  });
+
+  test("rejects non-string upstream", () => {
+    const config = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          upstream: 123,
+        },
+      ],
+    };
+    assert.throws(
+      () => validateRawConfig(config as unknown as RawConfig),
+      /upstream.*must be a string/i
+    );
+  });
+
+  test("rejects non-string source", () => {
+    const config = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          source: { url: "foo" },
+        },
+      ],
+    };
+    assert.throws(
+      () => validateRawConfig(config as unknown as RawConfig),
+      /source.*must be a string/i
+    );
+  });
+
+  test("accepts HTTPS upstream URL", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          upstream: "https://github.com/opensource/tool.git",
+        },
+      ],
+    };
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("accepts SSH source URL", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          source: "git@ssh.dev.azure.com:v3/org/project/repo",
+        },
+      ],
+    };
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+
+  test("rejects GitHub SSH URL as migration source", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          source: "git@github.com:other-org/source-repo.git",
+        },
+      ],
+    };
+    assert.throws(
+      () => validateRawConfig(config),
+      /source.*cannot be a GitHub URL.*not supported/i
+    );
+  });
+
+  test("rejects GitHub HTTPS URL as migration source", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          source: "https://github.com/other-org/source-repo.git",
+        },
+      ],
+    };
+    assert.throws(
+      () => validateRawConfig(config),
+      /source.*cannot be a GitHub URL.*not supported/i
+    );
+  });
+
+  test("rejects GHE URL as migration source when githubHosts configured", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      githubHosts: ["github.mycompany.com"],
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+          source: "git@github.mycompany.com:other-org/source-repo.git",
+        },
+      ],
+    };
+    assert.throws(
+      () => validateRawConfig(config),
+      /source.*cannot be a GitHub URL.*not supported/i
+    );
+  });
+
+  test("accepts repo without upstream or source", () => {
+    const config: RawConfig = {
+      id: "test",
+      files: { "test.txt": { content: "test" } },
+      repos: [
+        {
+          git: "git@github.com:my-org/repo.git",
+        },
+      ],
+    };
+    assert.doesNotThrow(() => validateRawConfig(config));
+  });
+});
+
 describe("validateRepoSettings", () => {
   // Helper to create a minimal valid config with settings
   const createSettingsConfig = (

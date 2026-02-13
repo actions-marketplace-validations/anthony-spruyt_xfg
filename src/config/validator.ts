@@ -13,6 +13,46 @@ import { validateRuleset } from "./validators/ruleset-validator.js";
 const CONFIG_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const CONFIG_ID_MAX_LENGTH = 64;
 
+/**
+ * Check if a string looks like a valid git URL.
+ * Supports SSH (git@host:path) and HTTPS (https://host/path) formats.
+ */
+function isValidGitUrl(url: string): boolean {
+  // SSH format: git@hostname:path
+  if (/^git@[^:]+:.+$/.test(url)) {
+    return true;
+  }
+  // HTTPS format: https://hostname/path
+  if (/^https?:\/\/[^/]+\/.+$/.test(url)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Escape special regex characters in a string.
+ */
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Check if a git URL points to GitHub (github.com).
+ * Used to reject GitHub URLs as migration sources (not supported).
+ */
+function isGitHubUrl(url: string, githubHosts?: string[]): boolean {
+  const hosts = ["github.com", ...(githubHosts ?? [])];
+  for (const host of hosts) {
+    if (
+      url.startsWith(`git@${host}:`) ||
+      url.match(new RegExp(`^https?://${escapeRegExp(host)}/`))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function getGitDisplayName(git: string | string[]): string {
   if (Array.isArray(git)) {
     return git[0] || "unknown";
@@ -306,6 +346,48 @@ export function validateRawConfig(config: RawConfig): void {
     }
     if (Array.isArray(repo.git) && repo.git.length === 0) {
       throw new Error(`Repo at index ${i} has empty git array`);
+    }
+
+    // Validate lifecycle fields (upstream/source)
+    if (repo.upstream !== undefined && repo.source !== undefined) {
+      throw new Error(
+        `Repo ${getGitDisplayName(repo.git)}: 'upstream' and 'source' are mutually exclusive. ` +
+          `Use 'upstream' to fork, or 'source' to migrate, not both.`
+      );
+    }
+
+    if (repo.upstream !== undefined) {
+      if (typeof repo.upstream !== "string") {
+        throw new Error(
+          `Repo ${getGitDisplayName(repo.git)}: 'upstream' must be a string`
+        );
+      }
+      if (!isValidGitUrl(repo.upstream)) {
+        throw new Error(
+          `Repo ${getGitDisplayName(repo.git)}: 'upstream' must be a valid git URL ` +
+            `(SSH: git@host:path or HTTPS: https://host/path)`
+        );
+      }
+    }
+
+    if (repo.source !== undefined) {
+      if (typeof repo.source !== "string") {
+        throw new Error(
+          `Repo ${getGitDisplayName(repo.git)}: 'source' must be a string`
+        );
+      }
+      if (!isValidGitUrl(repo.source)) {
+        throw new Error(
+          `Repo ${getGitDisplayName(repo.git)}: 'source' must be a valid git URL ` +
+            `(SSH: git@host:path or HTTPS: https://host/path)`
+        );
+      }
+      if (isGitHubUrl(repo.source, config.githubHosts)) {
+        throw new Error(
+          `Repo ${getGitDisplayName(repo.git)}: 'source' cannot be a GitHub URL. ` +
+            `Migration from GitHub is not supported. Currently supported sources: Azure DevOps`
+        );
+      }
     }
 
     // Validate per-repo file overrides

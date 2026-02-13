@@ -23,6 +23,19 @@ import type { RepoSettingsProcessorResult } from "../../src/settings/repo-settin
 import type { RulesetProcessorResult } from "../../src/settings/rulesets/processor.js";
 import type { ProcessorResult } from "../../src/sync/repository-processor.js";
 import type { RulesetPlanResult } from "../../src/settings/rulesets/formatter.js";
+import type { IRepoLifecycleManager } from "../../src/lifecycle/types.js";
+
+const noopLifecycleManager: IRepoLifecycleManager = {
+  async ensureRepo(_repoConfig, repoInfo) {
+    return { repoInfo, action: "existed" };
+  },
+};
+
+const failingLifecycleManager: IRepoLifecycleManager = {
+  async ensureRepo() {
+    throw new Error("Lifecycle check failed: repo creation error");
+  },
+};
 import type { RepoSettingsPlanResult } from "../../src/settings/repo-settings/formatter.js";
 
 const testDir = join(process.cwd(), "test-settings-cmd-tmp");
@@ -207,7 +220,8 @@ repos:
         { config: testConfigPath, dryRun: true },
         () => createMockRulesetProcessor(),
         () => createMockRepoProcessor(),
-        () => mockRepoSettingsProcessor
+        () => mockRepoSettingsProcessor,
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");
@@ -246,7 +260,8 @@ repos:
         { config: testConfigPath, dryRun: true },
         () => createMockRulesetProcessor(),
         () => createMockRepoProcessor(),
-        () => mockRepoSettingsProcessor
+        () => mockRepoSettingsProcessor,
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");
@@ -275,7 +290,8 @@ repos:
         { config: testConfigPath, dryRun: true },
         () => createMockRulesetProcessor(),
         () => createMockRepoProcessor(),
-        () => mockRepoSettingsProcessor
+        () => mockRepoSettingsProcessor,
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");
@@ -307,7 +323,8 @@ repos:
             { config: testConfigPath, dryRun: true },
             () => createMockRulesetProcessor(),
             () => createMockRepoProcessor(),
-            () => mockRepoSettingsProcessor
+            () => mockRepoSettingsProcessor,
+            noopLifecycleManager
           ),
         /process\.exit\(1\)/
       );
@@ -336,10 +353,74 @@ repos:
             { config: testConfigPath, dryRun: true },
             () => createMockRulesetProcessor(),
             () => createMockRepoProcessor(),
-            () => createMockRepoSettingsProcessor()
+            () => createMockRepoSettingsProcessor(),
+            noopLifecycleManager
           ),
         /process\.exit\(1\)/
       );
+      assert.equal(exitCode, 1);
+    });
+  });
+
+  describe("lifecycle error handling", () => {
+    test("handles lifecycle error in rulesets processing", async () => {
+      writeFileSync(
+        testConfigPath,
+        `id: test-config
+${MINIMAL_FILES}
+repos:
+  - git: https://github.com/test/repo
+    upstream: https://github.com/other/upstream
+    settings:
+      rulesets:${VALID_RULESET}
+`
+      );
+
+      await assert.rejects(
+        async () =>
+          runSettings(
+            { config: testConfigPath, dryRun: true },
+            () => createMockRulesetProcessor(),
+            () => createMockRepoProcessor(),
+            () => createMockRepoSettingsProcessor(),
+            failingLifecycleManager
+          ),
+        /process\.exit\(1\)/
+      );
+
+      const output = consoleOutput.join("\n");
+      assert.ok(output.includes("Lifecycle error"));
+      assert.equal(exitCode, 1);
+    });
+
+    test("handles lifecycle error in repo settings processing", async () => {
+      writeFileSync(
+        testConfigPath,
+        `id: test-config
+${MINIMAL_FILES}
+repos:
+  - git: https://github.com/test/repo
+    upstream: https://github.com/other/upstream
+    settings:
+      repo:
+        has_issues: true
+`
+      );
+
+      await assert.rejects(
+        async () =>
+          runSettings(
+            { config: testConfigPath, dryRun: true },
+            () => createMockRulesetProcessor(),
+            () => createMockRepoProcessor(),
+            () => createMockRepoSettingsProcessor(),
+            failingLifecycleManager
+          ),
+        /process\.exit\(1\)/
+      );
+
+      const output = consoleOutput.join("\n");
+      assert.ok(output.includes("Lifecycle error"));
       assert.equal(exitCode, 1);
     });
   });
@@ -361,7 +442,8 @@ repos:
         { config: testConfigPath, dryRun: true },
         () => createMockRulesetProcessor(),
         () => createMockRepoProcessor(),
-        () => createMockRepoSettingsProcessor()
+        () => createMockRepoSettingsProcessor(),
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");
@@ -392,7 +474,8 @@ repos:
             { config: testConfigPath, dryRun: true },
             () => mockRulesetProcessor,
             () => createMockRepoProcessor(),
-            () => createMockRepoSettingsProcessor()
+            () => createMockRepoSettingsProcessor(),
+            noopLifecycleManager
           ),
         /process\.exit\(1\)/
       );
@@ -420,7 +503,8 @@ repos:
         { config: testConfigPath, dryRun: true },
         () => mockRulesetProcessor,
         () => createMockRepoProcessor(),
-        () => createMockRepoSettingsProcessor()
+        () => createMockRepoSettingsProcessor(),
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");
@@ -451,7 +535,8 @@ repos:
         { config: testConfigPath, dryRun: true, workDir: testDir },
         () => mockRulesetProcessor,
         () => mockRepoProcessor,
-        () => createMockRepoSettingsProcessor()
+        () => createMockRepoSettingsProcessor(),
+        noopLifecycleManager
       );
 
       const updateManifestCalls = (
@@ -487,7 +572,8 @@ repos:
         { config: testConfigPath, dryRun: true, workDir: testDir },
         () => mockRulesetProcessor,
         () => mockRepoProcessor,
-        () => createMockRepoSettingsProcessor()
+        () => createMockRepoSettingsProcessor(),
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");
@@ -525,7 +611,8 @@ repos:
         { config: testConfigPath, dryRun: true },
         () => mockRulesetProcessor,
         () => createMockRepoProcessor(),
-        () => createMockRepoSettingsProcessor()
+        () => createMockRepoSettingsProcessor(),
+        noopLifecycleManager
       );
 
       const output = consoleOutput.join("\n");

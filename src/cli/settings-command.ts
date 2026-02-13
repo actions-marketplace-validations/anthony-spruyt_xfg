@@ -8,6 +8,11 @@ import {
   getRepoDisplayName,
   isGitHubRepo,
 } from "../shared/repo-detector.js";
+import type { GitHubRepoInfo } from "../shared/repo-detector.js";
+import {
+  hasGitHubAppCredentials,
+  GitHubAppTokenManager,
+} from "../vcs/index.js";
 import { logger } from "../shared/logger.js";
 import { generateWorkspaceName } from "../shared/workspace-utils.js";
 import { RepoResult } from "../output/github-summary.js";
@@ -34,6 +39,11 @@ import {
 } from "./types.js";
 import type { Config, RepoConfig } from "../config/types.js";
 import type { RepoInfo } from "../shared/repo-detector.js";
+import {
+  RepoLifecycleManager,
+  runLifecycleCheck,
+  type IRepoLifecycleManager,
+} from "../lifecycle/index.js";
 
 /**
  * Options for the settings command.
@@ -72,6 +82,87 @@ class ResultsCollector {
 }
 
 /**
+ * Run lifecycle checks for all unique repos before processing.
+ * Returns a Set of git URLs that failed lifecycle checks.
+ */
+async function runLifecycleChecks(
+  allRepos: RepoConfig[],
+  config: Config,
+  options: SettingsOptions,
+  lifecycleManager: IRepoLifecycleManager,
+  results: RepoResult[],
+  collector: ResultsCollector,
+  tokenManager: GitHubAppTokenManager | null
+): Promise<Set<string>> {
+  const checked = new Set<string>();
+  const failed = new Set<string>();
+
+  for (let i = 0; i < allRepos.length; i++) {
+    const repoConfig = allRepos[i];
+
+    if (checked.has(repoConfig.git)) {
+      continue;
+    }
+    checked.add(repoConfig.git);
+
+    let repoInfo: RepoInfo;
+    try {
+      repoInfo = parseGitUrl(repoConfig.git, {
+        githubHosts: config.githubHosts,
+      });
+    } catch {
+      // URL parsing errors are handled in individual processors
+      continue;
+    }
+
+    const repoName = getRepoDisplayName(repoInfo);
+
+    // Resolve auth token for lifecycle gh commands
+    let lifecycleToken: string | undefined;
+    if (isGitHubRepo(repoInfo)) {
+      try {
+        lifecycleToken =
+          (await tokenManager?.getTokenForRepo(repoInfo as GitHubRepoInfo)) ??
+          process.env.GH_TOKEN;
+      } catch {
+        lifecycleToken = process.env.GH_TOKEN;
+      }
+    }
+
+    try {
+      const { outputLines } = await runLifecycleCheck(
+        repoConfig,
+        repoInfo,
+        i,
+        {
+          dryRun: options.dryRun ?? false,
+          workDir: options.workDir,
+          githubHosts: config.githubHosts,
+          token: lifecycleToken,
+        },
+        lifecycleManager,
+        config.settings?.repo
+      );
+
+      for (const line of outputLines) {
+        logger.info(line);
+      }
+    } catch (error) {
+      logger.error(
+        i + 1,
+        repoName,
+        `Lifecycle error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      results.push(buildErrorResult(repoName, error));
+      collector.appendError(repoName, error);
+      failed.add(repoConfig.git);
+    }
+  }
+
+  return failed;
+}
+
+/**
  * Process rulesets for all configured repositories.
  */
 async function processRulesets(
@@ -81,10 +172,15 @@ async function processRulesets(
   processor: IRulesetProcessor,
   repoProcessor: IRepositoryProcessor,
   results: RepoResult[],
-  collector: ResultsCollector
+  collector: ResultsCollector,
+  lifecycleFailed: Set<string>
 ): Promise<void> {
   for (let i = 0; i < repos.length; i++) {
     const repoConfig = repos[i];
+
+    if (lifecycleFailed.has(repoConfig.git)) {
+      continue;
+    }
 
     let repoInfo: RepoInfo;
     try {
@@ -195,7 +291,8 @@ async function processRepoSettings(
   options: SettingsOptions,
   processorFactory: RepoSettingsProcessorFactory,
   results: RepoResult[],
-  collector: ResultsCollector
+  collector: ResultsCollector,
+  lifecycleFailed: Set<string>
 ): Promise<void> {
   if (repos.length === 0) {
     return;
@@ -207,13 +304,18 @@ async function processRepoSettings(
 
   for (let i = 0; i < repos.length; i++) {
     const repoConfig = repos[i];
+
+    if (lifecycleFailed.has(repoConfig.git)) {
+      continue;
+    }
+
     let repoInfo: RepoInfo;
     try {
       repoInfo = parseGitUrl(repoConfig.git, {
         githubHosts: config.githubHosts,
       });
     } catch (error) {
-      console.error(`Failed to parse ${repoConfig.git}: ${error}`);
+      logger.error(i + 1, repoConfig.git, String(error));
       collector.appendError(repoConfig.git, error);
       continue;
     }
@@ -264,7 +366,7 @@ async function processRepoSettings(
         collector.getOrCreate(repoName).settingsResult = result;
       }
     } catch (error) {
-      console.error(`  ✗ ${repoName}: ${error}`);
+      logger.error(i + 1, repoName, String(error));
       collector.appendError(repoName, error);
     }
   }
@@ -277,7 +379,8 @@ export async function runSettings(
   options: SettingsOptions,
   processorFactory: RulesetProcessorFactory = defaultRulesetProcessorFactory,
   repoProcessorFactory: ProcessorFactory = defaultProcessorFactory,
-  repoSettingsProcessorFactory: RepoSettingsProcessorFactory = defaultRepoSettingsProcessorFactory
+  repoSettingsProcessorFactory: RepoSettingsProcessorFactory = defaultRepoSettingsProcessorFactory,
+  lifecycleManager?: IRepoLifecycleManager
 ): Promise<void> {
   const configPath = resolve(options.config);
 
@@ -330,8 +433,28 @@ export async function runSettings(
 
   const processor = processorFactory();
   const repoProcessor = repoProcessorFactory();
+  const lm =
+    lifecycleManager ?? new RepoLifecycleManager(undefined, options.retries);
+  const tokenManager = hasGitHubAppCredentials()
+    ? new GitHubAppTokenManager(
+        process.env.XFG_GITHUB_APP_ID!,
+        process.env.XFG_GITHUB_APP_PRIVATE_KEY!
+      )
+    : null;
   const results: RepoResult[] = [];
   const collector = new ResultsCollector();
+
+  // Pre-check lifecycle for all unique repos before processing
+  const allRepos = [...reposWithRulesets, ...reposWithRepoSettings];
+  const lifecycleFailed = await runLifecycleChecks(
+    allRepos,
+    config,
+    options,
+    lm,
+    results,
+    collector,
+    tokenManager
+  );
 
   await processRulesets(
     reposWithRulesets,
@@ -340,7 +463,8 @@ export async function runSettings(
     processor,
     repoProcessor,
     results,
-    collector
+    collector,
+    lifecycleFailed
   );
 
   await processRepoSettings(
@@ -349,7 +473,8 @@ export async function runSettings(
     options,
     repoSettingsProcessorFactory,
     results,
-    collector
+    collector,
+    lifecycleFailed
   );
 
   console.log("");

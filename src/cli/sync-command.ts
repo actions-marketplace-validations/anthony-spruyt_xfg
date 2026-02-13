@@ -8,8 +8,17 @@ import {
   RepoConfig,
 } from "../config/index.js";
 import { validateForSync } from "../config/validator.js";
-import { parseGitUrl, getRepoDisplayName } from "../shared/repo-detector.js";
+import {
+  parseGitUrl,
+  getRepoDisplayName,
+  isGitHubRepo,
+} from "../shared/repo-detector.js";
+import type { GitHubRepoInfo } from "../shared/repo-detector.js";
 import { sanitizeBranchName, validateBranchName } from "../vcs/git-ops.js";
+import {
+  hasGitHubAppCredentials,
+  GitHubAppTokenManager,
+} from "../vcs/index.js";
 import { logger } from "../shared/logger.js";
 import { generateWorkspaceName } from "../shared/workspace-utils.js";
 import { RepoInfo } from "../shared/repo-detector.js";
@@ -20,6 +29,11 @@ import {
   writeSyncReportSummary,
 } from "../output/sync-report.js";
 import type { ProcessorResult } from "../sync/index.js";
+import {
+  RepoLifecycleManager,
+  runLifecycleCheck,
+  type IRepoLifecycleManager,
+} from "../lifecycle/index.js";
 
 /**
  * Shared options common to all commands.
@@ -108,7 +122,8 @@ function determineMergeOutcome(
  */
 export async function runSync(
   options: SyncOptions,
-  processorFactory: ProcessorFactory = defaultProcessorFactory
+  processorFactory: ProcessorFactory = defaultProcessorFactory,
+  lifecycleManager?: IRepoLifecycleManager
 ): Promise<void> {
   const configPath = resolve(options.config);
 
@@ -148,6 +163,14 @@ export async function runSync(
   console.log(`Branch: ${branchName}\n`);
 
   const processor = processorFactory();
+  const lm =
+    lifecycleManager ?? new RepoLifecycleManager(undefined, options.retries);
+  const tokenManager = hasGitHubAppCredentials()
+    ? new GitHubAppTokenManager(
+        process.env.XFG_GITHUB_APP_ID!,
+        process.env.XFG_GITHUB_APP_PRIVATE_KEY!
+      )
+    : null;
   const reportResults: SyncResultEntry[] = [];
 
   for (let i = 0; i < config.repos.length; i++) {
@@ -186,6 +209,52 @@ export async function runSync(
     const workDir = resolve(
       join(options.workDir ?? "./tmp", generateWorkspaceName(i))
     );
+
+    // Resolve auth token for lifecycle gh commands
+    let lifecycleToken: string | undefined;
+    if (isGitHubRepo(repoInfo)) {
+      try {
+        lifecycleToken =
+          (await tokenManager?.getTokenForRepo(repoInfo as GitHubRepoInfo)) ??
+          process.env.GH_TOKEN;
+      } catch {
+        lifecycleToken = process.env.GH_TOKEN;
+      }
+    }
+
+    // Check if repo exists, create/fork/migrate if needed
+    try {
+      const { outputLines } = await runLifecycleCheck(
+        repoConfig,
+        repoInfo,
+        i,
+        {
+          dryRun: options.dryRun ?? false,
+          resolvedWorkDir: workDir,
+          githubHosts: config.githubHosts,
+          token: lifecycleToken,
+        },
+        lm,
+        config.settings?.repo
+      );
+
+      for (const line of outputLines) {
+        logger.info(line);
+      }
+    } catch (error) {
+      logger.error(
+        current,
+        repoName,
+        `Lifecycle error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      reportResults.push({
+        repoName,
+        success: false,
+        fileChanges: [],
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
 
     try {
       logger.progress(current, repoName, "Processing...");

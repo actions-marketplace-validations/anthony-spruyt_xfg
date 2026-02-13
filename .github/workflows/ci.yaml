@@ -599,6 +599,242 @@ jobs:
           fi
           echo "Ruleset created successfully"
 
+  integration-test-cli-lifecycle-github-pat:
+    needs:
+      - "build"
+    if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: integration-github-8
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          chmod +x .github/scripts/git-credential-ado.sh
+          git config --global credential."https://dev.azure.com".helper "$(pwd)/.github/scripts/git-credential-ado.sh"
+          git config --global credential."https://dev.azure.com".useHttpPath true
+
+      - name: Run lifecycle integration tests (PAT)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.AZURE_DEVOPS_EXT_PAT }}
+        run: npm run test:integration:github-lifecycle
+
+  integration-test-cli-lifecycle-github-app:
+    needs:
+      - "build"
+    if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: integration-github-9
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          chmod +x .github/scripts/git-credential-ado.sh
+          git config --global credential."https://dev.azure.com".helper "$(pwd)/.github/scripts/git-credential-ado.sh"
+          git config --global credential."https://dev.azure.com".useHttpPath true
+
+      - name: Run lifecycle integration tests (GitHub App)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          XFG_GITHUB_APP_ID: ${{ vars.TEST_APP_ID }}
+          XFG_GITHUB_APP_PRIVATE_KEY: ${{ secrets.TEST_APP_PRIVATE_KEY }}
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.AZURE_DEVOPS_EXT_PAT }}
+        run: npm run test:integration:github-lifecycle-app
+
+  integration-test-action-lifecycle-pat:
+    needs:
+      - "build"
+    if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: integration-github-10
+      cancel-in-progress: false
+
+    env:
+      OWNER: anthony-spruyt
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: package
+
+      - name: Set package path
+        run: echo "XFG_PACKAGE=$(ls aspruyt-xfg-*.tgz)" >> "$GITHUB_ENV"
+
+      - name: Arrange — generate unique repo name and config
+        id: arrange
+        run: >-
+          .github/scripts/create-ephemeral-repo-config.sh
+          "action-pat" "${{ env.OWNER }}"
+          "/tmp/lifecycle-action-pat-config.yaml"
+          "lifecycle-action-pat-test"
+          "lifecycle-action-test.json"
+          '{"createdByAction": true}'
+
+      - name: Act — run xfg action (create repo via lifecycle)
+        uses: ./
+        with:
+          config: /tmp/lifecycle-action-pat-config.yaml
+          merge: direct
+          github-token: ${{ secrets.GH_PAT }}
+          xfg-package: "./${{ env.XFG_PACKAGE }}"
+
+      - name: Assert — verify repo was created
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_NAME: ${{ steps.arrange.outputs.repo_name }}
+        run: >-
+          .github/scripts/assert-ephemeral-repo.sh
+          "${OWNER}/${REPO_NAME}"
+          "lifecycle-action-test.json"
+          '.createdByAction == true'
+
+      - name: Cleanup — delete ephemeral repo
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_NAME: ${{ steps.arrange.outputs.repo_name }}
+        run: .github/scripts/delete-ephemeral-repo.sh "${OWNER}/${REPO_NAME}"
+
+  integration-test-action-lifecycle-app:
+    needs:
+      - "build"
+    if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: integration-github-11
+      cancel-in-progress: false
+
+    env:
+      OWNER: anthony-spruyt
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: package
+
+      - name: Set package path
+        run: echo "XFG_PACKAGE=$(ls aspruyt-xfg-*.tgz)" >> "$GITHUB_ENV"
+
+      - name: Arrange — generate unique repo name and config
+        id: arrange
+        run: >-
+          .github/scripts/create-ephemeral-repo-config.sh
+          "action-app" "${{ env.OWNER }}"
+          "/tmp/lifecycle-action-app-config.yaml"
+          "lifecycle-action-app-test"
+          "lifecycle-action-test.json"
+          '{"createdByAction": true}'
+
+      - name: Act — run xfg action (create repo via lifecycle, App auth)
+        uses: ./
+        with:
+          config: /tmp/lifecycle-action-app-config.yaml
+          merge: direct
+          github-token: ${{ github.token }}
+          github-app-id: ${{ vars.TEST_APP_ID }}
+          github-app-private-key: ${{ secrets.TEST_APP_PRIVATE_KEY }}
+          xfg-package: "./${{ env.XFG_PACKAGE }}"
+
+      - name: Assert — verify repo was created
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_NAME: ${{ steps.arrange.outputs.repo_name }}
+        run: >-
+          .github/scripts/assert-ephemeral-repo.sh
+          "${OWNER}/${REPO_NAME}"
+          "lifecycle-action-test.json"
+          '.createdByAction == true'
+
+      - name: Cleanup — delete ephemeral repo
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_NAME: ${{ steps.arrange.outputs.repo_name }}
+        run: .github/scripts/delete-ephemeral-repo.sh "${OWNER}/${REPO_NAME}"
+
   # Summary job for branch protection - add jobs to 'needs' array
   summary:
     needs:
@@ -613,5 +849,9 @@ jobs:
       - "integration-test-action-sync-pat"
       - "integration-test-action-sync-app"
       - "integration-test-action-settings-app"
+      - "integration-test-cli-lifecycle-github-pat"
+      - "integration-test-cli-lifecycle-github-app"
+      - "integration-test-action-lifecycle-pat"
+      - "integration-test-action-lifecycle-app"
     if: "always()"
     uses: "anthony-spruyt/repo-operator/.github/workflows/_summary.yaml@main"

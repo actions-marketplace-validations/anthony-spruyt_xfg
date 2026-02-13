@@ -23,19 +23,11 @@ import type { RepoSettingsProcessorResult } from "../../src/settings/repo-settin
 import type { RulesetProcessorResult } from "../../src/settings/rulesets/processor.js";
 import type { ProcessorResult } from "../../src/sync/repository-processor.js";
 import type { RulesetPlanResult } from "../../src/settings/rulesets/formatter.js";
-import type { IRepoLifecycleManager } from "../../src/lifecycle/types.js";
-
-const noopLifecycleManager: IRepoLifecycleManager = {
-  async ensureRepo(_repoConfig, repoInfo) {
-    return { repoInfo, action: "existed" };
-  },
-};
-
-const failingLifecycleManager: IRepoLifecycleManager = {
-  async ensureRepo() {
-    throw new Error("Lifecycle check failed: repo creation error");
-  },
-};
+import {
+  noopLifecycleManager,
+  failingLifecycleManager,
+  creatingLifecycleManager,
+} from "../mocks/index.js";
 import type { RepoSettingsPlanResult } from "../../src/settings/repo-settings/formatter.js";
 
 const testDir = join(process.cwd(), "test-settings-cmd-tmp");
@@ -391,6 +383,47 @@ repos:
       const output = consoleOutput.join("\n");
       assert.ok(output.includes("Lifecycle error"));
       assert.equal(exitCode, 1);
+    });
+
+    test("skips rulesets and repo settings in dry-run when lifecycle would create repo", async () => {
+      writeFileSync(
+        testConfigPath,
+        `id: test-config
+${MINIMAL_FILES}
+repos:
+  - git: https://github.com/test/repo
+    settings:
+      rulesets:${VALID_RULESET}
+      repo:
+        has_issues: true
+`
+      );
+
+      const mockRulesetProcessor = createMockRulesetProcessor();
+      const mockRepoSettingsProcessor = createMockRepoSettingsProcessor();
+
+      await runSettings(
+        { config: testConfigPath, dryRun: true },
+        () => mockRulesetProcessor,
+        () => createMockRepoProcessor(),
+        () => mockRepoSettingsProcessor,
+        creatingLifecycleManager
+      );
+
+      // Neither processor should be called — repo doesn't exist in dry-run
+      assert.equal(
+        (mockRulesetProcessor.process as MockFn).mock.calls.length,
+        0,
+        "rulesets processor should not be called for non-existent repo in dry-run"
+      );
+      assert.equal(
+        (mockRepoSettingsProcessor.process as MockFn).mock.calls.length,
+        0,
+        "repo settings processor should not be called for non-existent repo in dry-run"
+      );
+
+      const output = consoleOutput.join("\n");
+      assert.ok(output.includes("CREATE"));
     });
 
     test("handles lifecycle error in repo settings processing", async () => {

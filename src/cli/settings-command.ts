@@ -83,7 +83,7 @@ class ResultsCollector {
 
 /**
  * Run lifecycle checks for all unique repos before processing.
- * Returns a Set of git URLs that failed lifecycle checks.
+ * Returns a Set of git URLs to skip (lifecycle errors or repos that would be created in dry-run).
  */
 async function runLifecycleChecks(
   allRepos: RepoConfig[],
@@ -95,7 +95,7 @@ async function runLifecycleChecks(
   tokenManager: GitHubAppTokenManager | null
 ): Promise<Set<string>> {
   const checked = new Set<string>();
-  const failed = new Set<string>();
+  const skippedRepos = new Set<string>();
 
   for (let i = 0; i < allRepos.length; i++) {
     const repoConfig = allRepos[i];
@@ -130,7 +130,7 @@ async function runLifecycleChecks(
     }
 
     try {
-      const { outputLines } = await runLifecycleCheck(
+      const { outputLines, lifecycleResult } = await runLifecycleCheck(
         repoConfig,
         repoInfo,
         i,
@@ -147,6 +147,11 @@ async function runLifecycleChecks(
       for (const line of outputLines) {
         logger.info(line);
       }
+
+      // In dry-run, skip processing repos that don't exist yet
+      if (options.dryRun && lifecycleResult.action !== "existed") {
+        skippedRepos.add(repoConfig.git);
+      }
     } catch (error) {
       logger.error(
         i + 1,
@@ -155,11 +160,11 @@ async function runLifecycleChecks(
       );
       results.push(buildErrorResult(repoName, error));
       collector.appendError(repoName, error);
-      failed.add(repoConfig.git);
+      skippedRepos.add(repoConfig.git);
     }
   }
 
-  return failed;
+  return skippedRepos;
 }
 
 /**
@@ -173,12 +178,12 @@ async function processRulesets(
   repoProcessor: IRepositoryProcessor,
   results: RepoResult[],
   collector: ResultsCollector,
-  lifecycleFailed: Set<string>
+  lifecycleSkipped: Set<string>
 ): Promise<void> {
   for (let i = 0; i < repos.length; i++) {
     const repoConfig = repos[i];
 
-    if (lifecycleFailed.has(repoConfig.git)) {
+    if (lifecycleSkipped.has(repoConfig.git)) {
       continue;
     }
 
@@ -292,7 +297,7 @@ async function processRepoSettings(
   processorFactory: RepoSettingsProcessorFactory,
   results: RepoResult[],
   collector: ResultsCollector,
-  lifecycleFailed: Set<string>
+  lifecycleSkipped: Set<string>
 ): Promise<void> {
   if (repos.length === 0) {
     return;
@@ -305,7 +310,7 @@ async function processRepoSettings(
   for (let i = 0; i < repos.length; i++) {
     const repoConfig = repos[i];
 
-    if (lifecycleFailed.has(repoConfig.git)) {
+    if (lifecycleSkipped.has(repoConfig.git)) {
       continue;
     }
 
@@ -446,7 +451,7 @@ export async function runSettings(
 
   // Pre-check lifecycle for all unique repos before processing
   const allRepos = [...reposWithRulesets, ...reposWithRepoSettings];
-  const lifecycleFailed = await runLifecycleChecks(
+  const lifecycleSkipped = await runLifecycleChecks(
     allRepos,
     config,
     options,
@@ -464,7 +469,7 @@ export async function runSettings(
     repoProcessor,
     results,
     collector,
-    lifecycleFailed
+    lifecycleSkipped
   );
 
   await processRepoSettings(
@@ -474,7 +479,7 @@ export async function runSettings(
     repoSettingsProcessorFactory,
     results,
     collector,
-    lifecycleFailed
+    lifecycleSkipped
   );
 
   console.log("");

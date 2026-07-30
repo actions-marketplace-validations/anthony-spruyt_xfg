@@ -1,17 +1,14 @@
 import chalk from "chalk";
+import { formatScalarValue } from "../../shared/string-utils.js";
+import { formatChangeLines, type PlanEntry } from "../base-processor.js";
 import type { RepoSettingsChange } from "./diff.js";
 
-export interface RepoSettingsPlanEntry {
-  property: string;
-  action: "add" | "change";
-  oldValue?: unknown;
-  newValue?: unknown;
-}
+export type RepoSettingsPlanEntry = PlanEntry;
 
 export interface RepoSettingsPlanResult {
   lines: string[];
-  adds: number;
-  changes: number;
+  creates: number;
+  updates: number;
   warnings: string[];
   entries: RepoSettingsPlanEntry[];
 }
@@ -20,11 +17,7 @@ export interface RepoSettingsPlanResult {
  * Format a value for display.
  */
 function formatValue(val: unknown): string {
-  if (val === null) return "null";
-  if (val === undefined) return "undefined";
-  if (typeof val === "string") return `"${val}"`;
-  if (typeof val === "boolean") return val ? "true" : "false";
-  return String(val);
+  return formatScalarValue(val) ?? String(val);
 }
 
 /**
@@ -57,14 +50,10 @@ function getWarning(change: RepoSettingsChange): string | undefined {
 export function formatRepoSettingsPlan(
   changes: RepoSettingsChange[]
 ): RepoSettingsPlanResult {
-  const lines: string[] = [];
   const warnings: string[] = [];
-  let adds = 0;
-  let changesCount = 0;
-  const entries: RepoSettingsPlanEntry[] = [];
 
   if (changes.length === 0) {
-    return { lines, adds, changes: 0, warnings, entries };
+    return { lines: [], creates: 0, updates: 0, warnings, entries: [] };
   }
 
   for (const change of changes) {
@@ -72,34 +61,10 @@ export function formatRepoSettingsPlan(
     if (warning) {
       warnings.push(warning);
     }
-
-    if (change.action === "add") {
-      lines.push(
-        chalk.green(`    + ${change.property}: ${formatValue(change.newValue)}`)
-      );
-      adds++;
-      entries.push({
-        property: change.property,
-        action: "add",
-        newValue: change.newValue,
-      });
-    } else if (change.action === "change") {
-      lines.push(
-        chalk.yellow(
-          `    ~ ${change.property}: ${formatValue(change.oldValue)} → ${formatValue(change.newValue)}`
-        )
-      );
-      changesCount++;
-      entries.push({
-        property: change.property,
-        action: "change",
-        oldValue: change.oldValue,
-        newValue: change.newValue,
-      });
-    }
   }
 
-  return { lines, adds, changes: changesCount, warnings, entries };
+  const result = formatChangeLines(changes, formatValue);
+  return { ...result, warnings };
 }
 
 /**

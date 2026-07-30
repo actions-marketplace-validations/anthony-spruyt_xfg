@@ -1,38 +1,44 @@
-import { RepoInfo, isGitHubRepo } from "../shared/repo-detector.js";
+import { type RepoInfo, isGitHubRepo } from "../repo/index.js";
 import type { ICommitStrategy } from "./types.js";
 import { GitCommitStrategy } from "./git-commit-strategy.js";
 import { GraphQLCommitStrategy } from "./graphql-commit-strategy.js";
-import { ICommandExecutor } from "../shared/command-executor.js";
+import { FileModeFixupCommitStrategy } from "./file-mode-fixup-commit-strategy.js";
+import { GitHubAppTokenManager } from "./github-app-token-manager.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
+
+interface GitHubAppCredentials {
+  clientId: string;
+  privateKey: string;
+}
 
 /**
- * Checks if GitHub App credentials are configured via environment variables.
- * Both XFG_GITHUB_APP_ID and XFG_GITHUB_APP_PRIVATE_KEY must be set.
+ * Creates a GitHubAppTokenManager from credentials, or null if not provided.
  */
-export function hasGitHubAppCredentials(): boolean {
-  return !!(
-    process.env.XFG_GITHUB_APP_ID && process.env.XFG_GITHUB_APP_PRIVATE_KEY
+export function createTokenManager(
+  credentials?: GitHubAppCredentials
+): GitHubAppTokenManager | null {
+  if (!credentials) {
+    return null;
+  }
+  return new GitHubAppTokenManager(
+    credentials.clientId,
+    credentials.privateKey
   );
 }
 
 /**
- * Factory function to get the appropriate commit strategy for a repository.
- *
- * For GitHub repositories with GitHub App credentials (XFG_GITHUB_APP_ID and
- * XFG_GITHUB_APP_PRIVATE_KEY), returns GraphQLCommitStrategy which creates
- * verified commits via the GitHub GraphQL API.
- *
- * For all other cases (GitHub with PAT, Azure DevOps, GitLab), returns GitCommitStrategy
- * which uses standard git commands.
- *
- * @param repoInfo - Repository information
- * @param executor - Optional command executor for shell commands
+ * Returns FileModeFixupCommitStrategy (decorating GraphQLCommitStrategy) for
+ * GitHub repos with App credentials (verified commits + executable file mode
+ * support), or GitCommitStrategy for all other cases.
  */
-export function getCommitStrategy(
+export function createCommitStrategy(
   repoInfo: RepoInfo,
-  executor?: ICommandExecutor
+  executor: ICommandExecutor,
+  hasAppCredentials?: boolean
 ): ICommitStrategy {
-  if (isGitHubRepo(repoInfo) && hasGitHubAppCredentials()) {
-    return new GraphQLCommitStrategy(executor);
+  if (isGitHubRepo(repoInfo) && hasAppCredentials) {
+    const inner = new GraphQLCommitStrategy(executor);
+    return new FileModeFixupCommitStrategy(inner, executor);
   }
   return new GitCommitStrategy(executor);
 }

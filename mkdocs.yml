@@ -31,6 +31,11 @@ theme:
   icon:
     repo: fontawesome/brands/github
 
+extra:
+  version:
+    provider: mike
+    alias: true
+
 markdown_extensions:
   - admonition
   - pymdownx.details
@@ -64,15 +69,21 @@ nav:
       - Overview: configuration/index.md
       - Content Types: configuration/content-types.md
       - Content Inheritance: configuration/inheritance.md
+      - Groups: configuration/groups.md
       - Environment Variables: configuration/env-variables.md
       - Templating: configuration/templating.md
       - Merge Strategies: configuration/merge-strategies.md
       - File References: configuration/file-references.md
+      - Multi-File Config: configuration/multi-file.md
       - PR Options: configuration/pr-options.md
       - PR Templates: configuration/pr-templates.md
       - Repo Lifecycle: configuration/lifecycle.md
       - Repository Settings: configuration/repo-settings.md
       - GitHub Rulesets: configuration/rulesets.md
+      - GitHub Labels: configuration/labels.md
+      - GitHub Variables: configuration/variables.md
+      - Secrets: configuration/secrets.md
+      - Code Scanning: configuration/code-scanning.md
   - Examples:
       - Overview: examples/index.md
       - Multi-File Sync: examples/multi-file-sync.md
@@ -90,6 +101,7 @@ nav:
   - Platforms:
       - Overview: platforms/index.md
       - GitHub: platforms/github.md
+      - GitHub App: platforms/github-app.md
       - Azure DevOps: platforms/azure-devops.md
       - GitLab: platforms/gitlab.md
   - CI/CD:
@@ -99,6 +111,9 @@ nav:
   - Reference:
       - CLI Options: reference/cli-options.md
       - Config Schema: reference/config-schema.md
+  - Migration:
+      - v4 to v5: migration-v5.md
+      - v3 to v4: migration-v4.md
   - Troubleshooting: troubleshooting.md
   - Security:
       - Secret Rotation: security/secret-rotation.md

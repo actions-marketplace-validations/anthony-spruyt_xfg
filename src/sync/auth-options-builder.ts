@@ -1,26 +1,44 @@
-import {
-  RepoInfo,
-  isGitHubRepo,
-  GitHubRepoInfo,
-} from "../shared/repo-detector.js";
-import { GitAuthOptions } from "../vcs/authenticated-git-ops.js";
-import { ILogger } from "../shared/logger.js";
-import { GitHubAppTokenManager } from "../vcs/github-app-token-manager.js";
+import { type RepoInfo, isGitHubRepo } from "../repo/index.js";
+import type { GitHubRepoInfo } from "../repo/index.js";
+import type { GitAuthOptions, GitHubAppTokenManager } from "../vcs/index.js";
 import type { AuthResult, IAuthOptionsBuilder } from "./types.js";
+import type { ILogger } from "../shared/logger.js";
+import { resolveGitHubToken } from "../shared/gh-token-utils.js";
 
 export class AuthOptionsBuilder implements IAuthOptionsBuilder {
   constructor(
     private readonly tokenManager: GitHubAppTokenManager | null,
-    private readonly log: ILogger
+    private readonly log?: ILogger,
+    private readonly envToken?: string
   ) {}
 
-  async resolve(repoInfo: RepoInfo, repoName: string): Promise<AuthResult> {
-    // 1. Get installation token if GitHub App configured
-    const installationToken = await this.getInstallationToken(repoInfo);
+  async resolve(
+    repoInfo: RepoInfo,
+    repoName: string,
+    token?: string
+  ): Promise<AuthResult> {
+    if (!isGitHubRepo(repoInfo)) {
+      return { ok: true, token: undefined, authOptions: undefined };
+    }
 
-    // 2. Handle "no installation found" case
-    if (installationToken === null) {
+    // If caller already resolved a token, use it directly
+    if (token !== undefined) {
+      const authOptions = this.buildAuthOptions(repoInfo, token);
+      return { ok: true, token, authOptions };
+    }
+
+    // Otherwise resolve via token manager / env fallback
+    const resolved = await resolveGitHubToken({
+      repoInfo,
+      tokenManager: this.tokenManager,
+      context: repoName,
+      log: this.log,
+      envToken: this.envToken,
+    });
+
+    if (resolved.skipped) {
       return {
+        ok: false,
         skipResult: {
           success: true,
           repoName,
@@ -30,44 +48,20 @@ export class AuthOptionsBuilder implements IAuthOptionsBuilder {
       };
     }
 
-    // 3. Build effective token (installation token or PAT fallback)
-    const token =
-      installationToken ??
-      (isGitHubRepo(repoInfo) ? process.env.GH_TOKEN : undefined);
-
-    // 4. Build auth options if we have a token
-    const authOptions = token
-      ? this.buildAuthOptions(repoInfo, token)
+    const authOptions = resolved.token
+      ? this.buildAuthOptions(repoInfo, resolved.token)
       : undefined;
 
-    return { token, authOptions };
+    return { ok: true, token: resolved.token, authOptions };
   }
 
-  private async getInstallationToken(
-    repoInfo: RepoInfo
-  ): Promise<string | null | undefined> {
-    if (!this.tokenManager || !isGitHubRepo(repoInfo)) {
-      return undefined;
-    }
-
-    try {
-      return await this.tokenManager.getTokenForRepo(
-        repoInfo as GitHubRepoInfo
-      );
-    } catch (error) {
-      this.log.info(
-        `Warning: Failed to get GitHub App token: ${error instanceof Error ? error.message : String(error)}`
-      );
-      return undefined;
-    }
-  }
-
-  private buildAuthOptions(repoInfo: RepoInfo, token: string): GitAuthOptions {
+  private buildAuthOptions(
+    repoInfo: GitHubRepoInfo,
+    token: string
+  ): GitAuthOptions {
     return {
       token,
-      host: isGitHubRepo(repoInfo)
-        ? (repoInfo as GitHubRepoInfo).host
-        : "github.com",
+      host: repoInfo.host,
       owner: repoInfo.owner,
       repo: repoInfo.repo,
     };

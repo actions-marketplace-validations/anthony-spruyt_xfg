@@ -30,6 +30,10 @@ coverage/
 # Temp work directory
 tmp/
 
+# Test temp directories (cleanup in afterEach, but gitignore as safety net)
+test-*-tmp/
+tmp-*-test/
+
 # Logs
 *.log
 npm-debug.log*
@@ -44,4 +48,12 @@ Thumbs.db
 # Worktrees
 .worktrees/
 
+# Desloppify (ephemeral artifacts; state + query are tracked)
+.desloppify/external_review_sessions/
+.desloppify/review_packet_blind.json
+.desloppify/review_packets/
+.desloppify/state-typescript.json.bak
+.desloppify/subagents/
+
 docs/plans
+.desloppify/

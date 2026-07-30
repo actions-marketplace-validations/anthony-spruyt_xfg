@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PRMergeHandler } from "../../../src/sync/pr-merge-handler.js";
 import { createMockLogger, createMockExecutor } from "../../mocks/index.js";
-import type { GitHubRepoInfo } from "../../../src/shared/repo-detector.js";
-import type { RepoConfig } from "../../../src/config/types.js";
+import type { GitHubRepoInfo } from "../../../src/repo/index.js";
 import type { FileAction } from "../../../src/vcs/pr-creator.js";
 
 const testDir = join(tmpdir(), "pr-merge-handler-test-" + Date.now());
@@ -47,15 +46,10 @@ describe("PRMergeHandler", () => {
       const changedFiles: FileAction[] = [
         { fileName: "config.json", action: "create" },
       ];
-      const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
-        files: [],
-      };
 
-      const result = await handler.createAndMerge(
-        mockRepoInfo,
-        repoConfig,
-        {
+      const result = await handler.createAndMerge({
+        repoInfo: mockRepoInfo,
+        options: {
           branchName: "chore/sync",
           baseBranch: "main",
           workDir,
@@ -64,8 +58,8 @@ describe("PRMergeHandler", () => {
           executor: mockExecutor,
         },
         changedFiles,
-        "test/repo"
-      );
+        repoName: "test/repo",
+      });
 
       assert.equal(result.success, true);
       assert.ok(messages.some((msg) => msg.includes("Creating pull request")));
@@ -83,16 +77,11 @@ describe("PRMergeHandler", () => {
       const changedFiles: FileAction[] = [
         { fileName: "config.json", action: "create" },
       ];
-      const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
-        files: [],
-        prOptions: { merge: "manual" },
-      };
 
-      const result = await handler.createAndMerge(
-        mockRepoInfo,
-        repoConfig,
-        {
+      const result = await handler.createAndMerge({
+        repoInfo: mockRepoInfo,
+        prOptions: { merge: "manual" },
+        options: {
           branchName: "chore/sync",
           baseBranch: "main",
           workDir,
@@ -101,8 +90,8 @@ describe("PRMergeHandler", () => {
           executor: mockExecutor,
         },
         changedFiles,
-        "test/repo"
-      );
+        repoName: "test/repo",
+      });
 
       assert.equal(result.success, true);
       // Should not see "Handling merge" message
@@ -119,11 +108,6 @@ describe("PRMergeHandler", () => {
 
       const handler = new PRMergeHandler(mockLogger);
       const changedFiles: FileAction[] = [];
-      const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
-        files: [],
-        prOptions: { merge: "manual" },
-      };
       const diffStats = {
         newCount: 1,
         modifiedCount: 2,
@@ -131,10 +115,10 @@ describe("PRMergeHandler", () => {
         unchangedCount: 0,
       };
 
-      const result = await handler.createAndMerge(
-        mockRepoInfo,
-        repoConfig,
-        {
+      const result = await handler.createAndMerge({
+        repoInfo: mockRepoInfo,
+        prOptions: { merge: "manual" },
+        options: {
           branchName: "chore/sync",
           baseBranch: "main",
           workDir,
@@ -143,11 +127,94 @@ describe("PRMergeHandler", () => {
           executor: mockExecutor,
         },
         changedFiles,
-        "test/repo",
-        diffStats
-      );
+        repoName: "test/repo",
+        diffStats,
+      });
 
       assert.deepEqual(result.diffStats, diffStats);
+    });
+
+    test("passes labels to createPR", async () => {
+      const { mock: mockLogger } = createMockLogger();
+      const { mock: mockExecutor, calls } = createMockExecutor({
+        responses: new Map([
+          ["gh pr list", ""],
+          ["gh pr create", "https://github.com/test/repo/pull/1"],
+          ["gh pr merge", ""],
+        ]),
+      });
+
+      const handler = new PRMergeHandler(mockLogger);
+      const changedFiles: FileAction[] = [
+        { fileName: "config.json", action: "create" },
+      ];
+
+      await handler.createAndMerge({
+        repoInfo: mockRepoInfo,
+        prOptions: {
+          labels: ["config-sync", "automated"],
+        },
+        options: {
+          branchName: "chore/sync",
+          baseBranch: "main",
+          workDir,
+          dryRun: false,
+          retries: 1,
+          executor: mockExecutor,
+        },
+        changedFiles,
+        repoName: "test/repo",
+      });
+
+      const createCall = calls.find(
+        (c) =>
+          c.executable === "gh" &&
+          c.args.includes("create") &&
+          c.args.includes("pr")
+      );
+      assert.ok(createCall, "gh pr create should have been called");
+      assert.ok(
+        createCall.args.includes("--label"),
+        "gh pr create should include --label flag"
+      );
+    });
+
+    test("warns when merge operation fails", async () => {
+      const { mock: mockLogger, warnings } = createMockLogger();
+      const { mock: mockExecutor } = createMockExecutor({
+        responses: new Map<string, string | Error>([
+          ["gh pr list", ""],
+          ["gh pr create", "https://github.com/test/repo/pull/1"],
+          ["gh api", "true"],
+          ["gh pr merge", new Error("merge conflict")],
+        ]),
+      });
+
+      const handler = new PRMergeHandler(mockLogger);
+      const changedFiles: FileAction[] = [
+        { fileName: "config.json", action: "create" },
+      ];
+
+      const result = await handler.createAndMerge({
+        repoInfo: mockRepoInfo,
+        options: {
+          branchName: "chore/sync",
+          baseBranch: "main",
+          workDir,
+          dryRun: false,
+          retries: 0,
+          executor: mockExecutor,
+        },
+        changedFiles,
+        repoName: "test/repo",
+      });
+
+      assert.equal(result.success, true);
+      assert.ok(
+        warnings.some((msg) => msg.includes("Merge operation failed")),
+        `should warn about merge failure, got warnings: ${JSON.stringify(warnings)}`
+      );
+      assert.equal(result.mergeResult?.merged, false);
     });
   });
 });

@@ -1,6 +1,8 @@
-// src/output/lifecycle-report.ts
-import { appendFileSync } from "node:fs";
 import chalk from "chalk";
+import { writeGitHubStepSummary } from "./github-summary.js";
+import { formatCountEntry } from "./settings-report.js";
+import type { LifecycleActionKind } from "../lifecycle/index.js";
+import type { RepoVisibility } from "../config/index.js";
 
 export interface LifecycleReport {
   actions: LifecycleAction[];
@@ -14,69 +16,22 @@ export interface LifecycleReport {
 
 export interface LifecycleAction {
   repoName: string;
-  action: "existed" | "created" | "forked" | "migrated";
+  action: LifecycleActionKind;
   upstream?: string;
   source?: string;
   settings?: {
-    visibility?: string;
+    visibility?: RepoVisibility;
     description?: string;
   };
 }
 
-export interface LifecycleReportInput {
-  repoName: string;
-  action: "existed" | "created" | "forked" | "migrated";
-  upstream?: string;
-  source?: string;
-  settings?: {
-    visibility?: string;
-    description?: string;
-  };
-}
-
-// =============================================================================
-// Builder
-// =============================================================================
-
-export function buildLifecycleReport(
-  results: LifecycleReportInput[]
-): LifecycleReport {
-  const actions: LifecycleAction[] = [];
-  const totals = { created: 0, forked: 0, migrated: 0, existed: 0 };
-
-  for (const result of results) {
-    actions.push({
-      repoName: result.repoName,
-      action: result.action,
-      upstream: result.upstream,
-      source: result.source,
-      settings: result.settings,
-    });
-
-    totals[result.action]++;
-  }
-
-  return { actions, totals };
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-function formatSummary(totals: LifecycleReport["totals"]): string {
-  const total = totals.created + totals.forked + totals.migrated;
-
-  if (total === 0) {
-    return "No changes";
-  }
-
-  const parts: string[] = [];
-  if (totals.created > 0) parts.push(`${totals.created} to create`);
-  if (totals.forked > 0) parts.push(`${totals.forked} to fork`);
-  if (totals.migrated > 0) parts.push(`${totals.migrated} to migrate`);
-
-  const repoWord = total === 1 ? "repo" : "repos";
-  return `Plan: ${total} ${repoWord} (${parts.join(", ")})`;
+function formatLifecycleSummary(totals: LifecycleReport["totals"]): string {
+  const entry = formatCountEntry("repo", "repos", [
+    { label: "to create", value: totals.created },
+    { label: "to fork", value: totals.forked },
+    { label: "to migrate", value: totals.migrated },
+  ]);
+  return entry ? `Plan: ${entry}` : "No changes";
 }
 
 /**
@@ -86,40 +41,37 @@ export function hasLifecycleChanges(report: LifecycleReport): boolean {
   return report.actions.some((a) => a.action !== "existed");
 }
 
-// =============================================================================
-// CLI Formatter
-// =============================================================================
-
-export function formatLifecycleReportCLI(report: LifecycleReport): string[] {
-  if (!hasLifecycleChanges(report)) {
-    return [];
-  }
-
+/**
+ * Render action diff lines from lifecycle actions (shared between CLI and Markdown).
+ */
+function renderActionDiffLines(actions: LifecycleAction[]): string[] {
   const lines: string[] = [];
 
-  for (const action of report.actions) {
+  for (const action of actions) {
     if (action.action === "existed") continue;
 
     switch (action.action) {
       case "created":
-        lines.push(chalk.green(`+ CREATE ${action.repoName}`));
+        lines.push(`+ CREATE ${action.repoName}`);
         break;
 
       case "forked":
         lines.push(
-          chalk.green(
-            `+ FORK ${action.upstream ?? "upstream"} -> ${action.repoName}`
-          )
+          `+ FORK ${action.upstream ?? "upstream"} -> ${action.repoName}`
         );
         break;
 
       case "migrated":
         lines.push(
-          chalk.green(
-            `+ MIGRATE ${action.source ?? "source"} -> ${action.repoName}`
-          )
+          `+ MIGRATE ${action.source ?? "source"} -> ${action.repoName}`
         );
         break;
+
+      /* c8 ignore next 4 */
+      default: {
+        const _exhaustive: never = action.action;
+        throw new Error(`Unexpected lifecycle action: ${_exhaustive}`);
+      }
     }
 
     if (action.settings) {
@@ -132,17 +84,22 @@ export function formatLifecycleReportCLI(report: LifecycleReport): string[] {
     }
   }
 
-  lines.push("");
-
-  // Summary
-  lines.push(formatSummary(report.totals));
-
   return lines;
 }
 
-// =============================================================================
-// Markdown Formatter
-// =============================================================================
+export function formatLifecycleReportCLI(report: LifecycleReport): string[] {
+  if (!hasLifecycleChanges(report)) {
+    return [];
+  }
+
+  const lines = renderActionDiffLines(report.actions).map((line) =>
+    line.startsWith("+") ? chalk.green(line) : line
+  );
+  lines.push("");
+  lines.push(formatLifecycleSummary(report.totals));
+
+  return lines;
+}
 
 export function formatLifecycleReportMarkdown(
   report: LifecycleReport,
@@ -167,38 +124,7 @@ export function formatLifecycleReportMarkdown(
   }
 
   // Diff block
-  const diffLines: string[] = [];
-
-  for (const action of report.actions) {
-    if (action.action === "existed") continue;
-
-    switch (action.action) {
-      case "created":
-        diffLines.push(`+ CREATE ${action.repoName}`);
-        break;
-
-      case "forked":
-        diffLines.push(
-          `+ FORK ${action.upstream ?? "upstream"} -> ${action.repoName}`
-        );
-        break;
-
-      case "migrated":
-        diffLines.push(
-          `+ MIGRATE ${action.source ?? "source"} -> ${action.repoName}`
-        );
-        break;
-    }
-
-    if (action.settings) {
-      if (action.settings.visibility) {
-        diffLines.push(`    visibility: ${action.settings.visibility}`);
-      }
-      if (action.settings.description) {
-        diffLines.push(`    description: "${action.settings.description}"`);
-      }
-    }
-  }
+  const diffLines = renderActionDiffLines(report.actions);
 
   if (diffLines.length > 0) {
     lines.push("```diff");
@@ -208,24 +134,17 @@ export function formatLifecycleReportMarkdown(
   }
 
   // Summary
-  lines.push(`**${formatSummary(report.totals)}**`);
+  lines.push(`**${formatLifecycleSummary(report.totals)}**`);
 
   return lines.join("\n");
 }
 
-// =============================================================================
-// File Writer
-// =============================================================================
-
 export function writeLifecycleReportSummary(
   report: LifecycleReport,
-  dryRun: boolean
+  dryRun: boolean,
+  summaryPath: string | undefined
 ): void {
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (!summaryPath) return;
-
   const markdown = formatLifecycleReportMarkdown(report, dryRun);
   if (!markdown) return;
-
-  appendFileSync(summaryPath, "\n" + markdown + "\n");
+  writeGitHubStepSummary(markdown, summaryPath);
 }

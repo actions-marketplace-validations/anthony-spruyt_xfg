@@ -1,11 +1,41 @@
+# GitHub rate-limits unauthenticated requests (429 Too Many Requests)
+https://github.com/.*
+https://raw.githubusercontent.com/.*
+
+# GitHub API URLs require authentication and can't be validated
+https://api.github.com/.*
+
+# VS Code site returns 403 to automated link checkers
+https://code.visualstudio.com/.*
+
+# VS Code Marketplace (intermittent 503s)
+https://marketplace.visualstudio.com/
+
+
+# LAN server URLs use private .lan domains with shell variable substitution
+.*\.lan/.*
+
+# Internal MCP server hostname (not publicly accessible)
+https://litellm/
+
+# Localhost URLs are not reachable in CI/lint environments
+http://localhost.*
+https://localhost.*
+http://127\.0\.0\.1.*
+https://127\.0\.0\.1.*
+
+# Schema store times out intermittently in CI
+https://json\.schemastore\.org/.*
+
 # NPM package page (returns 403 to bots)
 https://www.npmjs.com/package/@aspruyt/xfg
 
 # GitLab test repos (403 for unauthenticated requests)
 https://gitlab.com/anthony-spruyt1/xfg-test.git
 
-# Example/placeholder URLs in documentation and schema
+# Example/placeholder URLs in documentation, schema, and fixture templates
 https://github.com/owner/repo.git
+https://github.com/OWNER/REPO_PLACEHOLDER.git
 https://github.com/anthony-spruyt/xfg/config-schema.json
 https://host/owner/repo.git
 
@@ -18,3 +48,13 @@ git+https://github.com/anthony-spruyt/xfg.git
 
 # Token placeholder URLs in GitHub Actions
 https://x-access-token/
+
+# Trivy schema URL (repo was emptied, schema no longer accessible)
+https://raw.githubusercontent.com/aquasecurity/trivy/main/schema/trivy-config.json
+
+# Codecov badge and dashboard (intermittent 502s)
+https://codecov.io/gh/anthony-spruyt/xfg
+https://codecov.io/gh/anthony-spruyt/xfg/graph/badge.svg
+
+# Azure DevOps (intermittent 503s)
+https://dev.azure.com/

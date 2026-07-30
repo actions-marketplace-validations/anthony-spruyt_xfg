@@ -1,11 +1,23 @@
-import type { ICommandExecutor } from "../../src/command-executor.js";
+import type {
+  ICommandExecutor,
+  ExecOptions,
+} from "../../src/shared/command-executor.js";
+
+/** Response value: a string, an Error to throw, or a factory function returning either. */
+export type MockResponse = string | Error | (() => string | Error);
 
 export interface ExecutorMockConfig {
   defaultResponse?: string;
-  responses?: Map<string, string | Error>;
+  responses?: Map<string, MockResponse>;
   trackCalls?: boolean;
-  /** Enable parsing of git commands to track commit messages, push branches, etc. */
   trackGitCommands?: boolean;
+}
+
+export interface ExecutorMockCall {
+  executable: string;
+  args: string[];
+  cwd: string;
+  options?: ExecOptions;
 }
 
 export interface GitCommandTracking {
@@ -16,16 +28,28 @@ export interface GitCommandTracking {
 
 export interface ExecutorMockResult {
   mock: ICommandExecutor;
-  calls: Array<{ command: string; cwd: string }>;
-  /** Git command tracking (only populated if trackGitCommands: true) */
+  calls: ExecutorMockCall[];
+  responses: Map<string, MockResponse>;
   git: GitCommandTracking;
   reset: () => void;
+}
+
+function matchesPattern(
+  executable: string,
+  args: string[],
+  pattern: string
+): boolean {
+  const tokens = pattern.split(/\s+/);
+  if (tokens.length === 0) return false;
+  if (tokens[0] !== executable) return false;
+  const remainingTokens = tokens.slice(1);
+  return remainingTokens.every((token) => args.includes(token));
 }
 
 export function createMockExecutor(
   config: ExecutorMockConfig = {}
 ): ExecutorMockResult {
-  const calls: Array<{ command: string; cwd: string }> = [];
+  const calls: ExecutorMockCall[] = [];
   const responses = config.responses ?? new Map();
   const defaultResponse = config.defaultResponse ?? "";
 
@@ -36,44 +60,44 @@ export function createMockExecutor(
   };
 
   const mock: ICommandExecutor = {
-    async exec(command: string, cwd: string): Promise<string> {
-      calls.push({ command, cwd });
+    async exec(
+      executable: string,
+      args: string[],
+      cwd: string,
+      opts?: ExecOptions
+    ): Promise<string> {
+      calls.push({ executable, args, cwd, options: opts });
 
-      // Track git commands if enabled (mock only - no actual command execution)
       if (config.trackGitCommands) {
-        // Track commit message from git commit command
-        if (command.includes("git commit")) {
-          const match = command.match(/-m ['"](.+)['"]/);
-          if (match) {
-            git.lastCommitMessage = match[1];
-          } else {
-            // Handle shell escaping - look for -m followed by escaped content
-            const msgMatch = command.match(/-m \$'([^']+)'/);
-            if (msgMatch) {
-              git.lastCommitMessage = msgMatch[1].replace(/\\'/g, "'");
-            }
+        if (executable === "git" && args.includes("commit")) {
+          const mIndex = args.indexOf("-m");
+          if (mIndex !== -1 && mIndex + 1 < args.length) {
+            git.lastCommitMessage = args[mIndex + 1];
           }
         }
-        // Track push branch and force flag
-        if (command.includes("git push")) {
-          git.pushForce = command.includes("--force-with-lease");
-          // Branch name may be shell-escaped with single quotes
-          const branchMatch = command.match(
-            /git push.*origin\s+'?([^'\s]+)'?(?:\s|$)/
-          );
-          if (branchMatch) {
-            git.pushBranch = branchMatch[1];
+        if (executable === "git" && args.includes("push")) {
+          git.pushForce = args.includes("--force-with-lease");
+          const originIndex = args.indexOf("origin");
+          if (originIndex !== -1) {
+            // Skip "--" separator if present after "origin"
+            const nextIndex =
+              originIndex + 1 < args.length && args[originIndex + 1] === "--"
+                ? originIndex + 2
+                : originIndex + 1;
+            if (nextIndex < args.length) {
+              git.pushBranch = args[nextIndex];
+            }
           }
         }
       }
 
-      // Check for matching response
       for (const [pattern, response] of responses) {
-        if (command.includes(pattern)) {
-          if (response instanceof Error) {
-            throw response;
+        if (matchesPattern(executable, args, pattern)) {
+          const result = typeof response === "function" ? response() : response;
+          if (result instanceof Error) {
+            throw result;
           }
-          return response;
+          return result;
         }
       }
 
@@ -84,6 +108,7 @@ export function createMockExecutor(
   return {
     mock,
     calls,
+    responses,
     git,
     reset: () => {
       calls.length = 0;

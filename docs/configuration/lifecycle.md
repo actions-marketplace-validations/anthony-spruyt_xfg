@@ -13,21 +13,23 @@ Before processing each repo, xfg checks if the target repository exists:
 
 ## Fields
 
-| Field      | Type   | Description                                                      |
-| ---------- | ------ | ---------------------------------------------------------------- |
-| `upstream` | string | Git URL of repo to fork from (GitHub only)                       |
-| `source`   | string | Git URL of repo to migrate from (e.g., Azure DevOps to GitHub)   |
+| Field      | Type   | Description                                                    |
+| ---------- | ------ | -------------------------------------------------------------- |
+| `upstream` | string | Git URL of repo to fork from (GitHub only)                     |
+| `source`   | string | Git URL of repo to migrate from (e.g., Azure DevOps to GitHub) |
 
 <!-- markdownlint-disable MD046 -->
+
 !!! warning "Mutually exclusive"
-    `upstream` and `source` cannot be used together on the same repo.
-    Use `upstream` for forking within GitHub, or `source` for cross-platform migration.
+    `upstream` and `source` cannot be used together on the same repo. Use `upstream` for forking within GitHub, or `source` for cross-platform migration.
+
 <!-- markdownlint-enable MD046 -->
 
 <!-- markdownlint-disable MD046 -->
+
 !!! note "Forking is GitHub-only"
-    Both the `upstream` and target repos must be on GitHub (or GitHub Enterprise).
-    Cross-platform forking is not supported. For cross-platform transfers, use `source` (migration) instead.
+    Both the `upstream` and target repos must be on GitHub (or GitHub Enterprise). Cross-platform forking is not supported. For cross-platform transfers, use `source` (migration) instead.
+
 <!-- markdownlint-enable MD046 -->
 
 ## Forking (`upstream`)
@@ -54,6 +56,7 @@ When the target repo doesn't exist, xfg will:
 If the repo already exists, the `upstream` field is ignored.
 
 <!-- markdownlint-disable MD046 -->
+
 !!! note "Git array expansion"
     When using a `git` array with `upstream`, the same upstream is applied to all expanded repos:
 
@@ -66,12 +69,14 @@ If the repo already exists, the `upstream` field is ignored.
     ```
 
     This creates two forks of `opensource/tool` with different names (`fork-a` and `fork-b`).
+
 <!-- markdownlint-enable MD046 -->
 
 <!-- markdownlint-disable MD046 -->
+
 !!! note "Fork settings"
-    After forking, xfg will apply `settings.repo.visibility` and `settings.repo.description`
-    if configured. This allows you to fork a public repo and make it private, or vice versa.
+    After forking, xfg will apply `settings.repo.visibility` and `settings.repo.description` if configured. This allows you to fork a public repo and make it private, or vice versa.
+
 <!-- markdownlint-enable MD046 -->
 
 ## Migration (`source`)
@@ -96,8 +101,7 @@ If the repo already exists, the `source` field is ignored.
 
 ## Creation Settings
 
-When creating a new repo (via create, fork, or migrate), xfg applies settings from `settings.repo` if configured.
-Repos are created as **private** by default. Set `visibility: public` explicitly if needed.
+When creating a new repo (via create, fork, or migrate), xfg applies settings from `settings.repo` if configured. Repos are created as **private** by default. Set `visibility: public` explicitly if needed.
 
 ```yaml
 settings:
@@ -114,12 +118,34 @@ repos:
 
 The following settings apply during repo creation:
 
-| Setting       | Description                                      |
-| ------------- | ------------------------------------------------ |
-| `description` | Repository description                           |
-| `visibility`  | `public`, `private`, or `internal`               |
-| `hasIssues`   | Enable/disable Issues (default: enabled)         |
-| `hasWiki`     | Enable/disable Wiki (default: enabled)           |
+| Setting         | Description                                            |
+| --------------- | ------------------------------------------------------ |
+| `description`   | Repository description                                 |
+| `visibility`    | `public`, `private`, or `internal`                     |
+| `hasIssues`     | Enable/disable Issues (default: enabled)               |
+| `hasWiki`       | Enable/disable Wiki (default: enabled)                 |
+| `defaultBranch` | Rename the default branch during creation or migration |
+
+### Default Branch Renaming
+
+When `settings.repo.defaultBranch` is set, xfg renames the default branch during lifecycle operations:
+
+| Operation    | Behaviour                                                                                    |
+| ------------ | -------------------------------------------------------------------------------------------- |
+| **Create**   | After creating the repo, detects the actual branch name and renames it via the GitHub API    |
+| **Migrate**  | Before pushing the mirror clone, renames the source HEAD branch in git                       |
+| **Fork**     | Ignored — forked repos inherit the upstream's branch structure                               |
+| **Settings** | Existing behaviour — updates the GitHub API pointer (branch must already exist by that name) |
+
+```yaml
+# Migrate ADO repo with 'master', rename to 'main' on GitHub
+repos:
+  - git: git@github.com:my-org/migrated-app.git
+    source: https://dev.azure.com/myorg/myproject/_git/legacy-app
+    settings:
+      repo:
+        defaultBranch: main
+```
 
 ### Empty Repository Initialization
 
@@ -141,12 +167,12 @@ In dry-run mode (`--dry-run`), lifecycle operations are reported but not execute
 
 ## Supported Platforms
 
-| Operation         | GitHub | Azure DevOps | GitLab |
-| ----------------- | ------ | ------------ | ------ |
-| Create (target)   | Yes    | -            | -      |
-| Fork (target)     | Yes    | -            | -      |
-| Migrate (target)  | Yes    | -            | -      |
-| Migrate (source)  | -      | Yes          | -      |
+| Operation        | GitHub | Azure DevOps | GitLab |
+| ---------------- | ------ | ------------ | ------ |
+| Create (target)  | Yes    | -            | -      |
+| Fork (target)    | Yes    | -            | -      |
+| Migrate (target) | Yes    | -            | -      |
+| Migrate (source) | -      | Yes          | -      |
 
 ## Example: Full Lifecycle Config
 

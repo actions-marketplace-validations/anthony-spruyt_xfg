@@ -1,19 +1,26 @@
-import { escapeShellArg } from "../shared/shell-utils.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
 import {
-  ICommandExecutor,
-  defaultExecutor,
-} from "../shared/command-executor.js";
-import { withRetry } from "../shared/retry-utils.js";
+  withRetry,
+  isPermanentError,
+  DEFAULT_PERMANENT_ERROR_PATTERNS,
+} from "../shared/retry-utils.js";
 import {
-  isGitHubRepo,
+  assertGitHubRepo,
   type RepoInfo,
   type GitHubRepoInfo,
-} from "../shared/repo-detector.js";
-import { logger } from "../shared/logger.js";
+} from "../repo/index.js";
+import { toErrorMessage } from "../shared/type-guards.js";
+import { LifecycleError } from "../shared/errors.js";
+import { buildTokenEnv, buildHostnameArgs } from "../shared/gh-api-utils.js";
+import type { DebugInfoWarnLog } from "../shared/logger.js";
 import type {
   IRepoLifecycleProvider,
   LifecyclePlatform,
   CreateRepoSettings,
+  LifecycleExistsParams,
+  LifecycleCreateParams,
+  LifecycleForkParams,
+  LifecycleReceiveMigrationParams,
 } from "./types.js";
 
 /**
@@ -30,27 +37,33 @@ const REPO_NOT_FOUND_PATTERNS = [
  */
 function isRepoNotFoundError(error: unknown): boolean {
   const message =
-    error instanceof Error
-      ? error.message + ((error as Error & { stderr?: string }).stderr ?? "")
-      : String(error);
+    toErrorMessage(error) +
+    ((error instanceof Error
+      ? (error as Error & { stderr?: string }).stderr
+      : undefined) ?? "");
   return REPO_NOT_FOUND_PATTERNS.some((pattern) => message.includes(pattern));
-}
-
-/**
- * Get the hostname flag for gh commands.
- * Returns "--hostname HOST" for GHE, empty string for github.com.
- */
-function getHostnameFlag(repoInfo: GitHubRepoInfo): string {
-  if (repoInfo.host && repoInfo.host !== "github.com") {
-    return `--hostname ${escapeShellArg(repoInfo.host)}`;
-  }
-  return "";
 }
 
 /**
  * Default timeout for waiting for fork readiness (60 seconds).
  */
 const FORK_READY_TIMEOUT_MS = 60_000;
+
+/**
+ * After repo creation, GitHub may return 404 due to eventual consistency.
+ * Exclude 404/not-found from permanent errors so withRetry retries them.
+ * The test string must trigger all not-found-family patterns in
+ * CORE_PERMANENT_ERROR_PATTERNS: /404\b/, /not\s*found/i,
+ * /repository\s*not\s*found/i, and /does\s*not\s*exist/i.
+ */
+const POST_CREATE_TEST_STRING =
+  "404 Repository not found. Resource does not exist";
+const POST_CREATE_PERMANENT_PATTERNS = [
+  ...DEFAULT_PERMANENT_ERROR_PATTERNS.filter(
+    (p) => !p.test(POST_CREATE_TEST_STRING)
+  ),
+  /already\s*exists/i,
+];
 
 /**
  * Interval between fork readiness checks (2 seconds).
@@ -61,14 +74,39 @@ const FORK_POLL_INTERVAL_MS = 2_000;
  * GitHub implementation of IRepoLifecycleProvider.
  * Uses gh CLI for all operations.
  */
-export interface GitHubLifecycleProviderOptions {
-  executor?: ICommandExecutor;
+interface GitHubLifecycleProviderOptions {
+  executor: ICommandExecutor;
   retries?: number;
-  cwd?: string;
+  cwd: string;
   /** Timeout in ms for waiting for fork readiness (default: 60000) */
   forkReadyTimeoutMs?: number;
   /** Poll interval in ms for fork readiness checks (default: 2000) */
   forkPollIntervalMs?: number;
+  log?: DebugInfoWarnLog;
+}
+
+function buildRepoCreateArgs(
+  args: string[],
+  settings: CreateRepoSettings | undefined
+): void {
+  if (settings?.visibility === "public") {
+    args.push("--public");
+  } else if (settings?.visibility === "internal") {
+    args.push("--internal");
+  } else {
+    args.push("--private");
+  }
+
+  if (settings?.description) {
+    args.push("--description", settings.description);
+  }
+
+  if (settings?.hasIssues === false) {
+    args.push("--disable-issues");
+  }
+  if (settings?.hasWiki === false) {
+    args.push("--disable-wiki");
+  }
 }
 
 export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
@@ -78,14 +116,17 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
   private readonly cwd: string;
   private readonly forkReadyTimeoutMs: number;
   private readonly forkPollIntervalMs: number;
+  private readonly log?: DebugInfoWarnLog;
 
-  constructor(options?: GitHubLifecycleProviderOptions) {
-    const opts = options ?? {};
-    this.executor = opts.executor ?? defaultExecutor;
-    this.retries = opts.retries ?? 3;
-    this.cwd = opts.cwd ?? process.cwd();
-    this.forkReadyTimeoutMs = opts.forkReadyTimeoutMs ?? FORK_READY_TIMEOUT_MS;
-    this.forkPollIntervalMs = opts.forkPollIntervalMs ?? FORK_POLL_INTERVAL_MS;
+  constructor(options: GitHubLifecycleProviderOptions) {
+    this.executor = options.executor;
+    this.retries = options.retries ?? 3;
+    this.cwd = options.cwd;
+    this.forkReadyTimeoutMs =
+      options.forkReadyTimeoutMs ?? FORK_READY_TIMEOUT_MS;
+    this.forkPollIntervalMs =
+      options.forkPollIntervalMs ?? FORK_POLL_INTERVAL_MS;
+    this.log = options.log;
   }
 
   /**
@@ -97,27 +138,35 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     repoInfo: GitHubRepoInfo,
     token?: string
   ): Promise<boolean> {
-    const tokenPrefix = this.buildTokenPrefix(token);
-    const hostnameFlag = getHostnameFlag(repoInfo);
-    const hostnamePart = hostnameFlag ? `${hostnameFlag} ` : "";
-    const command = `${tokenPrefix}gh api ${hostnamePart}users/${escapeShellArg(owner)}`;
+    const { tokenEnv, baseArgs } = this.buildGhApiPrefix(repoInfo, token);
 
     try {
       const stdout = await withRetry(
-        () => this.executor.exec(command, this.cwd),
+        () =>
+          this.executor.exec("gh", [...baseArgs, `users/${owner}`], this.cwd, {
+            env: tokenEnv,
+          }),
         { retries: this.retries }
       );
-      const data = JSON.parse(stdout);
+      const data: { type?: string } = JSON.parse(stdout);
       return data.type === "Organization";
     } catch (error) {
-      // If we can't determine, assume it's an org (safer - uses --org flag).
+      // Two-tier error handling:
+      // 1. Permanent errors (auth failures, 403/401) are rethrown — retrying
+      //    or falling through would mask a real credentials problem.
+      // 2. Transient errors (network timeouts, 5xx) fall through to assume
+      //    the owner is an organization, which is the safer default because
+      //    --org is required for org forks but harmless if wrong.
+      if (isPermanentError(error)) {
+        throw error;
+      }
       // This may cause fork to fail with a misleading error for personal accounts.
-      const errMsg = error instanceof Error ? error.message : String(error);
-      logger.debug(
+      const errMsg = toErrorMessage(error);
+      this.log?.debug(
         `Could not determine if '${owner}' is an organization, defaulting to org behavior: ${errMsg}`
       );
-      logger.info(
-        `Warning: Could not verify if '${owner}' is an organization or user account. ` +
+      this.log?.warn(
+        `Could not verify if '${owner}' is an organization or user account. ` +
           `If fork fails, check your authentication (gh auth status) and ensure the ` +
           `target owner is correct.`
       );
@@ -126,36 +175,44 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
   }
 
   private assertGitHub(repoInfo: RepoInfo): asserts repoInfo is GitHubRepoInfo {
-    if (!isGitHubRepo(repoInfo)) {
-      throw new Error(
-        `GitHubLifecycleProvider requires GitHub repo, got: ${repoInfo.type}`
-      );
-    }
+    assertGitHubRepo(repoInfo, "GitHubLifecycleProvider");
   }
 
-  /**
-   * Build GH_TOKEN prefix for gh CLI commands.
-   * Returns "GH_TOKEN=<escaped_token> " when token is provided, "" otherwise.
-   * Token is escaped via escapeShellArg to prevent injection.
-   */
-  private buildTokenPrefix(token?: string): string {
-    return token ? `GH_TOKEN=${escapeShellArg(token)} ` : "";
+  private buildGhApiPrefix(
+    repoInfo: GitHubRepoInfo,
+    token?: string
+  ): {
+    tokenEnv: Record<string, string> | undefined;
+    baseArgs: string[];
+    apiPath: string;
+  } {
+    const tokenEnv = buildTokenEnv(token);
+    const hostnameArgs = buildHostnameArgs(repoInfo);
+    const apiPath = `repos/${repoInfo.owner}/${repoInfo.repo}`;
+    return { tokenEnv, baseArgs: ["api", ...hostnameArgs], apiPath };
   }
 
-  async exists(repoInfo: RepoInfo, token?: string): Promise<boolean> {
+  async exists(params: LifecycleExistsParams): Promise<boolean> {
+    const { repo: repoInfo, token } = params;
     this.assertGitHub(repoInfo);
 
-    const tokenPrefix = this.buildTokenPrefix(token);
-    const hostnameFlag = getHostnameFlag(repoInfo);
-    const hostnamePart = hostnameFlag ? `${hostnameFlag} ` : "";
-    const command = `${tokenPrefix}gh api ${hostnamePart}repos/${escapeShellArg(repoInfo.owner)}/${escapeShellArg(repoInfo.repo)}`;
+    const { tokenEnv, baseArgs, apiPath } = this.buildGhApiPrefix(
+      repoInfo,
+      token
+    );
 
     try {
       // Note: withRetry already classifies 404/not-found as permanent errors,
       // so retries are aborted immediately for non-existent repos.
-      await withRetry(() => this.executor.exec(command, this.cwd), {
-        retries: this.retries,
-      });
+      await withRetry(
+        () =>
+          this.executor.exec("gh", [...baseArgs, apiPath], this.cwd, {
+            env: tokenEnv,
+          }),
+        {
+          retries: this.retries,
+        }
+      );
       return true;
     } catch (error) {
       // Distinguish "repo not found" from actual errors
@@ -167,67 +224,83 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     }
   }
 
-  async create(
-    repoInfo: RepoInfo,
-    settings?: CreateRepoSettings,
-    token?: string
-  ): Promise<void> {
+  async create(params: LifecycleCreateParams): Promise<void> {
+    const { repo: repoInfo, settings, token } = params;
     this.assertGitHub(repoInfo);
 
-    const tokenPrefix = this.buildTokenPrefix(token);
-    const parts: string[] = [
-      `${tokenPrefix}gh repo create`,
-      escapeShellArg(`${repoInfo.owner}/${repoInfo.repo}`),
+    const tokenEnv = buildTokenEnv(token);
+    const args: string[] = [
+      "repo",
+      "create",
+      `${repoInfo.owner}/${repoInfo.repo}`,
     ];
 
-    // Visibility flag (default to private for safety)
-    if (settings?.visibility === "public") {
-      parts.push("--public");
-    } else if (settings?.visibility === "internal") {
-      parts.push("--internal");
-    } else {
-      parts.push("--private");
-    }
-
-    // Description
-    if (settings?.description) {
-      parts.push("--description", escapeShellArg(settings.description));
-    }
-
-    // Disable features if specified
-    if (settings?.hasIssues === false) {
-      parts.push("--disable-issues");
-    }
-    if (settings?.hasWiki === false) {
-      parts.push("--disable-wiki");
-    }
+    buildRepoCreateArgs(args, settings);
 
     // Add --add-readme to establish the default branch via an initial commit.
     // This avoids empty repos where HEAD doesn't resolve.
-    parts.push("--add-readme");
+    args.push("--add-readme");
 
-    const command = parts.join(" ");
+    await withRetry(
+      () => this.executor.exec("gh", args, this.cwd, { env: tokenEnv }),
+      {
+        retries: this.retries,
+      }
+    );
 
-    await withRetry(() => this.executor.exec(command, this.cwd), {
-      retries: this.retries,
-    });
+    // Rename default branch if requested and it differs from what GitHub created.
+    if (settings?.defaultBranch) {
+      const {
+        tokenEnv: branchTokenEnv,
+        baseArgs,
+        apiPath,
+      } = this.buildGhApiPrefix(repoInfo, token);
+
+      // Detect the actual default branch name
+      const actualBranch = (
+        await withRetry(
+          () =>
+            this.executor.exec(
+              "gh",
+              [...baseArgs, apiPath, "--jq", ".default_branch"],
+              this.cwd,
+              { env: branchTokenEnv }
+            ),
+          {
+            retries: this.retries,
+            permanentErrorPatterns: POST_CREATE_PERMANENT_PATTERNS,
+          }
+        )
+      ).trim();
+
+      if (actualBranch !== settings.defaultBranch) {
+        await this.renameBranch(
+          repoInfo,
+          actualBranch,
+          settings.defaultBranch,
+          token
+        );
+
+        // Wait for the rename to propagate — GitHub's API may still report
+        // the old default branch for a few seconds after the rename call.
+        await this.waitForDefaultBranch(repoInfo, settings.defaultBranch, {
+          token,
+        });
+      }
+    }
 
     // Delete the README so xfg sync starts from a clean state.
     await this.deleteReadme(repoInfo, token);
   }
 
-  async fork(
-    upstream: RepoInfo,
-    target: RepoInfo,
-    settings?: CreateRepoSettings,
-    token?: string
-  ): Promise<void> {
+  async fork(params: LifecycleForkParams): Promise<void> {
+    const { upstream, target, settings, token } = params;
     this.assertGitHub(upstream);
     this.assertGitHub(target);
 
     // Guard: cannot fork a repo to the same owner
     if (upstream.owner.toLowerCase() === target.owner.toLowerCase()) {
-      throw new Error(
+      throw new LifecycleError(
         `Cannot fork ${upstream.owner}/${upstream.repo} to the same owner '${target.owner}'. ` +
           `The upstream and target owners must be different.`
       );
@@ -236,40 +309,57 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     // Determine if target owner is an organization or user
     const isOrg = await this.isOrganization(target.owner, target, token);
 
-    const tokenPrefix = this.buildTokenPrefix(token);
+    const tokenEnv = buildTokenEnv(token);
 
     // Build fork command
     // For orgs: gh repo fork <upstream> --org <target-org> --fork-name <name> --clone=false
     // For users: gh repo fork <upstream> --fork-name <name> --clone=false
-    const parts = [
-      `${tokenPrefix}gh repo fork`,
-      escapeShellArg(`${upstream.owner}/${upstream.repo}`),
-    ];
+    const forkArgs = ["repo", "fork", `${upstream.owner}/${upstream.repo}`];
 
     if (isOrg) {
-      parts.push("--org", escapeShellArg(target.owner));
+      forkArgs.push("--org", target.owner);
     }
 
-    parts.push("--fork-name", escapeShellArg(target.repo), "--clone=false");
+    forkArgs.push("--fork-name", target.repo, "--clone=false");
 
-    const forkCommand = parts.join(" ");
-
-    await withRetry(() => this.executor.exec(forkCommand, this.cwd), {
-      retries: this.retries,
-    });
+    await withRetry(
+      () => this.executor.exec("gh", forkArgs, this.cwd, { env: tokenEnv }),
+      {
+        retries: this.retries,
+      }
+    );
 
     // GitHub forks are async - wait for the fork to be ready for git operations
-    await this.waitForForkReady(
-      target,
-      this.forkReadyTimeoutMs,
-      this.forkPollIntervalMs,
-      token
-    );
+    await this.waitForForkReady(target, {
+      timeoutMs: this.forkReadyTimeoutMs,
+      pollMs: this.forkPollIntervalMs,
+      token,
+    });
 
     // Apply settings after fork (visibility, description, etc.)
     if (settings?.visibility || settings?.description) {
       await this.applyRepoSettings(target, settings, token);
     }
+  }
+
+  private async pollWithDeadline(
+    check: () => Promise<boolean>,
+    opts: { timeoutMs: number; pollMs: number; debugLabel: string }
+  ): Promise<boolean> {
+    const deadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        if (await check()) return true;
+      } catch (error) {
+        this.log?.debug(`Polling ${opts.debugLabel}: ${toErrorMessage(error)}`);
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(opts.pollMs, remaining))
+      );
+    }
+    return false;
   }
 
   /**
@@ -278,32 +368,23 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
    */
   private async waitForForkReady(
     repoInfo: GitHubRepoInfo,
-    timeoutMs: number = FORK_READY_TIMEOUT_MS,
-    intervalMs: number = FORK_POLL_INTERVAL_MS,
-    token?: string
+    options?: { timeoutMs?: number; pollMs?: number; token?: string }
   ): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
+    const timeoutMs = options?.timeoutMs ?? FORK_READY_TIMEOUT_MS;
+    const pollMs = options?.pollMs ?? FORK_POLL_INTERVAL_MS;
+    const token = options?.token;
 
-    while (Date.now() < deadline) {
-      try {
-        const ready = await this.exists(repoInfo, token);
-        if (ready) {
-          return;
-        }
-      } catch {
-        // Ignore transient errors during polling
-      }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(intervalMs, remaining))
+    const ready = await this.pollWithDeadline(
+      () => this.exists({ repo: repoInfo, token }),
+      { timeoutMs, pollMs, debugLabel: "fork readiness" }
+    );
+
+    if (!ready) {
+      throw new LifecycleError(
+        `Timed out waiting for fork ${repoInfo.owner}/${repoInfo.repo} to become available ` +
+          `after ${timeoutMs / 1000}s. The fork may still be processing on GitHub.`
       );
     }
-
-    throw new Error(
-      `Timed out waiting for fork ${repoInfo.owner}/${repoInfo.repo} to become available ` +
-        `after ${timeoutMs / 1000}s. The fork may still be processing on GitHub.`
-    );
   }
 
   /**
@@ -314,14 +395,11 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     settings: CreateRepoSettings,
     token?: string
   ): Promise<void> {
-    const tokenPrefix = this.buildTokenPrefix(token);
-    const parts = [
-      `${tokenPrefix}gh repo edit`,
-      escapeShellArg(`${repoInfo.owner}/${repoInfo.repo}`),
-    ];
+    const tokenEnv = buildTokenEnv(token);
+    const args = ["repo", "edit", `${repoInfo.owner}/${repoInfo.repo}`];
 
     if (settings.visibility) {
-      parts.push(
+      args.push(
         "--visibility",
         settings.visibility,
         "--accept-visibility-change-consequences"
@@ -329,45 +407,50 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     }
 
     if (settings.description) {
-      parts.push("--description", escapeShellArg(settings.description));
+      args.push("--description", settings.description);
     }
 
-    const command = parts.join(" ");
-
-    await withRetry(() => this.executor.exec(command, this.cwd), {
-      retries: this.retries,
-    });
+    await withRetry(
+      () => this.executor.exec("gh", args, this.cwd, { env: tokenEnv }),
+      {
+        retries: this.retries,
+      }
+    );
   }
 
   async receiveMigration(
-    repoInfo: RepoInfo,
-    sourceDir: string,
-    settings?: CreateRepoSettings,
-    token?: string
+    params: LifecycleReceiveMigrationParams
   ): Promise<void> {
+    const { repo: repoInfo, sourceDir, settings, token } = params;
     this.assertGitHub(repoInfo);
 
-    const tokenPrefix = this.buildTokenPrefix(token);
+    await this.removeOriginRemote(sourceDir);
+    await this.cleanNonStandardRefs(sourceDir);
+    await this.renameMirrorDefaultBranch(sourceDir, settings?.defaultBranch);
+    await this.createRepoAndPushMirror(repoInfo, sourceDir, settings, token);
+  }
 
-    // Remove existing "origin" remote if present (e.g., from git clone --mirror).
-    // gh repo create --source --push needs to set its own origin remote.
+  private async removeOriginRemote(sourceDir: string): Promise<void> {
     try {
       await this.executor.exec(
-        `git -C ${escapeShellArg(sourceDir)} remote remove origin`,
+        "git",
+        ["-C", sourceDir, "remote", "remove", "origin"],
         this.cwd
       );
-    } catch {
-      // No origin remote — nothing to remove
+    } catch (error) {
+      this.log?.debug(
+        `Cleanup: remote remove origin skipped - ${toErrorMessage(error)}`
+      );
     }
+  }
 
-    // Remove all non-standard refs that GitHub rejects on push.
-    // Mirror clones include ALL refs from the source, but GitHub only
-    // accepts branches (refs/heads/*) and tags (refs/tags/*).
-    // Other refs like refs/pull/* (GitHub), refs/merge-requests/* (GitLab),
-    // refs/keep-around/* etc. must be removed.
+  // Mirror clones include ALL refs from the source, but GitHub only
+  // accepts branches (refs/heads/*) and tags (refs/tags/*).
+  private async cleanNonStandardRefs(sourceDir: string): Promise<void> {
     try {
       const allRefs = await this.executor.exec(
-        `git -C ${escapeShellArg(sourceDir)} for-each-ref --format='%(refname)'`,
+        "git",
+        ["-C", sourceDir, "for-each-ref", "--format=%(refname)"],
         this.cwd
       );
       for (const ref of allRefs.split("\n").filter((r) => r.trim())) {
@@ -377,53 +460,181 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
           !trimmed.startsWith("refs/tags/")
         ) {
           await this.executor.exec(
-            `git -C ${escapeShellArg(sourceDir)} update-ref -d ${escapeShellArg(trimmed)}`,
+            "git",
+            ["-C", sourceDir, "update-ref", "-d", trimmed],
             this.cwd
           );
         }
       }
-    } catch {
-      // No refs to remove — ignore
+    } catch (error) {
+      this.log?.debug(
+        `Cleanup: ref cleanup skipped - ${toErrorMessage(error)}`
+      );
+    }
+  }
+
+  private async renameMirrorDefaultBranch(
+    sourceDir: string,
+    targetBranch?: string
+  ): Promise<void> {
+    if (!targetBranch) return;
+
+    const headRef = (
+      await this.executor.exec(
+        "git",
+        ["-C", sourceDir, "symbolic-ref", "HEAD"],
+        this.cwd
+      )
+    ).trim();
+
+    const prefix = "refs/heads/";
+    if (!headRef.startsWith(prefix)) {
+      throw new LifecycleError(
+        `Mirror clone HEAD symbolic-ref is '${headRef}', expected to start with '${prefix}'. ` +
+          `Cannot rename default branch.`
+      );
     }
 
-    // Use gh repo create --source --push to create and mirror in one step.
-    // For bare repos (from git clone --mirror), --push mirrors all refs.
-    // This uses gh CLI authentication, avoiding raw git auth issues with GHE.
-    const parts: string[] = [
-      `${tokenPrefix}gh repo create`,
-      escapeShellArg(`${repoInfo.owner}/${repoInfo.repo}`),
-      "--source",
-      escapeShellArg(sourceDir),
-      "--push",
-    ];
+    const sourceBranch = headRef.slice(prefix.length);
 
-    // Visibility flag (default to private for safety)
-    if (settings?.visibility === "public") {
-      parts.push("--public");
-    } else if (settings?.visibility === "internal") {
-      parts.push("--internal");
-    } else {
-      parts.push("--private");
+    if (sourceBranch !== targetBranch) {
+      await this.executor.exec(
+        "git",
+        ["-C", sourceDir, "branch", "-m", sourceBranch, targetBranch],
+        this.cwd
+      );
+      await this.executor.exec(
+        "git",
+        ["-C", sourceDir, "symbolic-ref", "HEAD", `refs/heads/${targetBranch}`],
+        this.cwd
+      );
+    }
+  }
+
+  private async createRepoAndPushMirror(
+    repoInfo: GitHubRepoInfo,
+    sourceDir: string,
+    settings: LifecycleReceiveMigrationParams["settings"],
+    token: string | undefined
+  ): Promise<void> {
+    // Split create and push: gh repo create --source --push does both
+    // atomically, but if the git backend hasn't propagated after the
+    // GraphQL create, the push fails with "Repository not found".
+    const repoSlug = `${repoInfo.owner}/${repoInfo.repo}`;
+    const tokenEnv = buildTokenEnv(token);
+    const createArgs: string[] = ["repo", "create", repoSlug];
+    buildRepoCreateArgs(createArgs, settings);
+
+    try {
+      await withRetry(
+        () => this.executor.exec("gh", createArgs, this.cwd, { env: tokenEnv }),
+        {
+          retries: this.retries,
+          permanentErrorPatterns: POST_CREATE_PERMANENT_PATTERNS,
+          log: this.log
+            ? { info: (m: string) => this.log!.info(m) }
+            : undefined,
+        }
+      );
+    } catch (error) {
+      if (!isPermanentError(error, [/already\s*exists/i])) {
+        throw error;
+      }
     }
 
-    // Description
-    if (settings?.description) {
-      parts.push("--description", escapeShellArg(settings.description));
-    }
+    const remoteUrl = token
+      ? `https://x-access-token:${token}@${repoInfo.host}/${repoSlug}.git`
+      : `https://${repoInfo.host}/${repoSlug}.git`;
 
-    // Disable features if specified
-    if (settings?.hasIssues === false) {
-      parts.push("--disable-issues");
-    }
-    if (settings?.hasWiki === false) {
-      parts.push("--disable-wiki");
-    }
+    await this.executor.exec(
+      "git",
+      ["-C", sourceDir, "remote", "add", "origin", remoteUrl],
+      this.cwd
+    );
 
-    const command = parts.join(" ");
+    await withRetry(
+      () =>
+        this.executor.exec(
+          "git",
+          ["-C", sourceDir, "push", "--mirror", "origin"],
+          this.cwd,
+          { env: tokenEnv }
+        ),
+      {
+        retries: this.retries,
+        permanentErrorPatterns: POST_CREATE_PERMANENT_PATTERNS,
+        log: this.log ? { info: (m: string) => this.log!.info(m) } : undefined,
+      }
+    );
+  }
 
-    await withRetry(() => this.executor.exec(command, this.cwd), {
-      retries: this.retries,
-    });
+  /**
+   * Rename a branch via the GitHub branch rename API.
+   * GitHub automatically updates the default branch pointer.
+   */
+  private async renameBranch(
+    repoInfo: GitHubRepoInfo,
+    current: string,
+    desired: string,
+    token?: string
+  ): Promise<void> {
+    const { tokenEnv, baseArgs, apiPath } = this.buildGhApiPrefix(
+      repoInfo,
+      token
+    );
+
+    await withRetry(
+      () =>
+        this.executor.exec(
+          "gh",
+          [
+            ...baseArgs,
+            `${apiPath}/branches/${current}/rename`,
+            "--method",
+            "POST",
+            "-f",
+            `new_name=${desired}`,
+          ],
+          this.cwd,
+          { env: tokenEnv }
+        ),
+      {
+        retries: this.retries,
+      }
+    );
+  }
+
+  /**
+   * Poll until the GitHub API reports the expected default branch.
+   * After a branch rename, the API may lag for a few seconds.
+   */
+  private async waitForDefaultBranch(
+    repoInfo: GitHubRepoInfo,
+    expectedBranch: string,
+    options?: { timeoutMs?: number; pollMs?: number; token?: string }
+  ): Promise<void> {
+    const timeoutMs = options?.timeoutMs ?? 15000;
+    const pollMs = options?.pollMs ?? 1000;
+    const { tokenEnv, baseArgs, apiPath } = this.buildGhApiPrefix(
+      repoInfo,
+      options?.token
+    );
+
+    // Best-effort wait — don't throw on timeout since rename already succeeded
+    await this.pollWithDeadline(
+      async () => {
+        const branch = (
+          await this.executor.exec(
+            "gh",
+            [...baseArgs, apiPath, "--jq", ".default_branch"],
+            this.cwd,
+            { env: tokenEnv }
+          )
+        ).trim();
+        return branch === expectedBranch;
+      },
+      { timeoutMs, pollMs, debugLabel: "default branch" }
+    );
   }
 
   /**
@@ -435,19 +646,24 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     repoInfo: GitHubRepoInfo,
     token?: string
   ): Promise<void> {
-    const tokenPrefix = this.buildTokenPrefix(token);
-    const hostnameFlag = getHostnameFlag(repoInfo);
-    const hostnamePart = hostnameFlag ? `${hostnameFlag} ` : "";
-    const apiPath = `repos/${escapeShellArg(repoInfo.owner)}/${escapeShellArg(repoInfo.repo)}`;
+    const { tokenEnv, baseArgs, apiPath } = this.buildGhApiPrefix(
+      repoInfo,
+      token
+    );
 
     // Get the SHA of the README.md created by --add-readme
     const fileInfo = await withRetry(
       () =>
         this.executor.exec(
-          `${tokenPrefix}gh api ${hostnamePart}${apiPath}/contents/README.md --jq '.sha'`,
-          this.cwd
+          "gh",
+          [...baseArgs, `${apiPath}/contents/README.md`, "--jq", ".sha"],
+          this.cwd,
+          { env: tokenEnv }
         ),
-      { retries: this.retries }
+      {
+        retries: this.retries,
+        permanentErrorPatterns: POST_CREATE_PERMANENT_PATTERNS,
+      }
     );
 
     const sha = fileInfo.trim();
@@ -456,11 +672,24 @@ export class GitHubLifecycleProvider implements IRepoLifecycleProvider {
     await withRetry(
       () =>
         this.executor.exec(
-          `${tokenPrefix}gh api ${hostnamePart}${apiPath}/contents/README.md ` +
-            `--method DELETE -f message='Remove initialization file' -f sha=${escapeShellArg(sha)}`,
-          this.cwd
+          "gh",
+          [
+            ...baseArgs,
+            `${apiPath}/contents/README.md`,
+            "--method",
+            "DELETE",
+            "-f",
+            "message=Remove initialization file",
+            "-f",
+            `sha=${sha}`,
+          ],
+          this.cwd,
+          { env: tokenEnv }
         ),
-      { retries: this.retries }
+      {
+        retries: this.retries,
+        permanentErrorPatterns: POST_CREATE_PERMANENT_PATTERNS,
+      }
     );
   }
 }

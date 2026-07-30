@@ -1,18 +1,30 @@
-import { ILogger } from "../shared/logger.js";
-import { getCommitStrategy, type FileChange } from "../vcs/index.js";
+import { createCommitStrategy, type FileChange } from "../vcs/index.js";
+import type { ICommitStrategy } from "../vcs/index.js";
+import type { RepoInfo } from "../repo/index.js";
+import { getRepoDisplayName } from "../repo/index.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
 import type {
   CommitPushOptions,
   CommitPushResult,
   ICommitPushManager,
 } from "./types.js";
+import { toErrorMessage } from "../shared/type-guards.js";
+import { BRANCH_PROTECTION_ERROR_PATTERNS } from "../shared/retry-utils.js";
+import type { DebugInfoLog } from "../shared/logger.js";
+
+type CommitStrategyFactory = (
+  repoInfo: RepoInfo,
+  executor: ICommandExecutor,
+  hasAppCredentials?: boolean
+) => ICommitStrategy;
 
 export class CommitPushManager implements ICommitPushManager {
-  constructor(private readonly log: ILogger) {}
+  constructor(
+    private readonly log: DebugInfoLog,
+    private readonly commitStrategyFactory: CommitStrategyFactory = createCommitStrategy
+  ) {}
 
-  async commitAndPush(
-    options: CommitPushOptions,
-    repoName: string
-  ): Promise<CommitPushResult> {
+  async commitAndPush(options: CommitPushOptions): Promise<CommitPushResult> {
     const {
       repoInfo,
       gitOps,
@@ -27,37 +39,42 @@ export class CommitPushManager implements ICommitPushManager {
       executor,
     } = options;
 
-    // Dry-run mode: just log
     if (dryRun) {
-      this.log.info("Staging changes...");
+      this.log.debug("Staging changes...");
       this.log.info(`Would commit: ${commitMessage}`);
-      this.log.info(`Would push to ${pushBranch}...`);
+      this.log.info(`Would push to ${pushBranch}`);
       return { success: true };
     }
 
-    // Build file changes for commit strategy
     const changes: FileChange[] = Array.from(fileChanges.entries())
       .filter(([, info]) => info.action !== "skip")
-      .map(([path, info]) => ({ path, content: info.content }));
+      .map(([path, info]) => ({
+        path,
+        content: info.content,
+        ...(info.mode ? { mode: info.mode } : {}),
+        ...(info.modeOnly ? { modeOnly: true as const } : {}),
+      }));
 
-    // Stage changes using injected executor (existing pattern in codebase)
     this.log.info("Staging changes...");
-    await executor.exec("git add -A", workDir);
+    await gitOps.stageAll();
 
-    // Check for staged changes
     if (!(await gitOps.hasStagedChanges())) {
-      this.log.info("No staged changes after git add -A, skipping commit");
+      this.log.info("No staged changes, skipping commit");
       return { success: true, skipped: true };
     }
 
-    // Commit and push
-    const commitStrategy = getCommitStrategy(repoInfo, executor);
-    this.log.info("Committing and pushing changes...");
+    const commitStrategy = this.commitStrategyFactory(
+      repoInfo,
+      executor,
+      options.hasAppCredentials
+    );
+    this.log.debug("Committing and pushing changes...");
 
     try {
       const result = await commitStrategy.commit({
         repoInfo,
         branchName: pushBranch,
+        baseBranch: options.baseBranch,
         message: commitMessage,
         fileChanges: changes,
         workDir,
@@ -69,25 +86,27 @@ export class CommitPushManager implements ICommitPushManager {
       this.log.info(`Committed: ${result.sha} (verified: ${result.verified})`);
       return { success: true };
     } catch (error) {
-      return this.handleCommitError(error, isDirectMode, pushBranch, repoName);
+      return this.classifyCommitError(
+        error,
+        isDirectMode,
+        pushBranch,
+        repoInfo
+      );
     }
   }
 
-  private handleCommitError(
+  private classifyCommitError(
     error: unknown,
     isDirectMode: boolean,
-    baseBranch: string,
-    repoName: string
+    pushBranch: string,
+    repoInfo: CommitPushOptions["repoInfo"]
   ): CommitPushResult {
-    if (!isDirectMode) {
-      throw error; // Re-throw for non-direct mode
-    }
+    const repoName = getRepoDisplayName(repoInfo);
+    const message = toErrorMessage(error);
 
-    const message = error instanceof Error ? error.message : String(error);
     if (
-      message.includes("rejected") ||
-      message.includes("protected") ||
-      message.includes("denied")
+      isDirectMode &&
+      BRANCH_PROTECTION_ERROR_PATTERNS.some((p) => p.test(message))
     ) {
       return {
         success: false,
@@ -95,13 +114,20 @@ export class CommitPushManager implements ICommitPushManager {
           success: false,
           repoName,
           message:
-            `Push to '${baseBranch}' was rejected (likely branch protection). ` +
+            `Push to '${pushBranch}' was rejected (likely branch protection). ` +
             `To use 'direct' mode, the target branch must allow direct pushes. ` +
             `Use 'merge: force' to create a PR and merge with admin privileges.`,
         },
       };
     }
 
-    throw error;
+    return {
+      success: false,
+      errorResult: {
+        success: false,
+        repoName,
+        message: `Commit/push failed: ${message}`,
+      },
+    };
   }
 }

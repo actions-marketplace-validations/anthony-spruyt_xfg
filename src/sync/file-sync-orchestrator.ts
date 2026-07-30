@@ -1,9 +1,9 @@
 import type { RepoConfig } from "../config/index.js";
-import type { RepoInfo } from "../shared/repo-detector.js";
+import type { RepoInfo } from "../repo/index.js";
 import type { ILogger } from "../shared/logger.js";
-import type { FileAction } from "../vcs/pr-creator.js";
+import type { FileAction } from "../vcs/index.js";
 import { incrementDiffStats } from "./diff-utils.js";
-import { loadManifest } from "./manifest.js";
+
 import type {
   IFileWriter,
   IManifestManager,
@@ -26,60 +26,67 @@ export class FileSyncOrchestrator implements IFileSyncOrchestrator {
     session: SessionContext,
     options: ProcessorOptions
   ): Promise<FileSyncResult> {
-    const { workDir, dryRun, noDelete, configId } = options;
+    const { workDir, configId } = options;
+    const dryRun = options.dryRun ?? false;
+    const noDelete = options.noDelete ?? false;
 
-    // Write files
     const { fileChanges, diffStats } = await this.fileWriter.writeFiles(
       repoConfig.files,
       {
         repoInfo,
         baseBranch: session.baseBranch,
         workDir,
-        dryRun: dryRun ?? false,
-        noDelete: noDelete ?? false,
+        dryRun,
+        noDelete,
         configId,
+        hasAppCredentials: options.hasAppCredentials,
       },
       { gitOps: session.gitOps, log: this.log }
     );
 
-    // Handle orphans
-    const existingManifest = loadManifest(workDir);
     const filesWithDeleteOrphaned = new Map<string, boolean | undefined>(
       repoConfig.files.map((f) => [f.fileName, f.deleteOrphaned])
     );
 
-    const { manifest: newManifest, filesToDelete } =
-      this.manifestManager.processOrphans(
-        workDir,
-        configId,
-        filesWithDeleteOrphaned
-      );
-
-    await this.manifestManager.deleteOrphans(
+    const {
+      manifest: newManifest,
+      existingManifest,
       filesToDelete,
-      { dryRun: dryRun ?? false, noDelete: noDelete ?? false },
+    } = this.manifestManager.detectOrphans(
+      workDir,
+      configId,
+      filesWithDeleteOrphaned
+    );
+
+    this.manifestManager.deleteOrphans(
+      filesToDelete,
+      { dryRun: dryRun, noDelete: noDelete },
       { gitOps: session.gitOps, log: this.log, fileChanges }
     );
 
-    // Update diff stats for deletions in dry-run
-    if (dryRun && filesToDelete.length > 0 && !noDelete) {
-      for (const fileName of filesToDelete) {
-        if (session.gitOps.fileExists(fileName)) {
-          incrementDiffStats(diffStats, "DELETED");
-        }
-      }
-    }
-
-    // Save manifest
+    // Save manifest (may add to fileChanges)
     this.manifestManager.saveUpdatedManifest(
       workDir,
       newManifest,
       existingManifest,
-      dryRun ?? false,
+      dryRun,
       fileChanges
     );
 
-    // Show diff summary in dry-run
+    // Count stats for entries added after writeFiles (orphan deletes + manifest).
+    // Invariant: writerFiles and post-write entries are disjoint — orphan deletes
+    // only target files NOT in the current config (see updateManifest), and
+    // the manifest file is never a config-managed file.
+    const writerFiles = new Set(repoConfig.files.map((f) => f.fileName));
+    for (const [name, info] of fileChanges) {
+      if (writerFiles.has(name)) continue;
+      if (info.action === "create") incrementDiffStats(diffStats, "NEW");
+      else if (info.action === "update")
+        incrementDiffStats(diffStats, "MODIFIED");
+      else if (info.action === "delete")
+        incrementDiffStats(diffStats, "DELETED");
+    }
+
     if (dryRun) {
       this.log.diffSummary(
         diffStats.newCount,
@@ -89,21 +96,9 @@ export class FileSyncOrchestrator implements IFileSyncOrchestrator {
       );
     }
 
-    // Build changed files list
     const changedFiles: FileAction[] = Array.from(fileChanges.entries()).map(
       ([fileName, info]) => ({ fileName, action: info.action })
     );
-
-    // Calculate diff stats for non-dry-run
-    if (!dryRun) {
-      for (const [, info] of fileChanges) {
-        if (info.action === "create") incrementDiffStats(diffStats, "NEW");
-        else if (info.action === "update")
-          incrementDiffStats(diffStats, "MODIFIED");
-        else if (info.action === "delete")
-          incrementDiffStats(diffStats, "DELETED");
-      }
-    }
 
     const hasChanges = changedFiles.some((f) => f.action !== "skip");
 

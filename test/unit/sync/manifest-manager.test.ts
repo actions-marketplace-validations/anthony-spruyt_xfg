@@ -25,7 +25,7 @@ describe("ManifestManager", () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 
-  describe("processOrphans", () => {
+  describe("detectOrphans", () => {
     test("identifies orphaned files from previous manifest", () => {
       // Setup: Create a manifest with a file that's no longer in config
       const manifest = {
@@ -46,7 +46,7 @@ describe("ManifestManager", () => {
         ["current-file.json", true],
       ]);
 
-      const result = manager.processOrphans(
+      const result = manager.detectOrphans(
         workDir,
         "test-config",
         currentFiles
@@ -74,7 +74,7 @@ describe("ManifestManager", () => {
         ["file.json", true],
       ]);
 
-      const result = manager.processOrphans(
+      const result = manager.detectOrphans(
         workDir,
         "test-config",
         currentFiles
@@ -89,7 +89,7 @@ describe("ManifestManager", () => {
         ["file.json", true],
       ]);
 
-      const result = manager.processOrphans(
+      const result = manager.detectOrphans(
         workDir,
         "test-config",
         currentFiles
@@ -102,7 +102,7 @@ describe("ManifestManager", () => {
   describe("deleteOrphans", () => {
     test("deletes files that exist and tracks in fileChanges", async () => {
       const deletedFiles: string[] = [];
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({
+      const { gitOps: mockGitOps } = createMockAuthenticatedGitOps({
         fileExists: (fileName) => fileName === "orphan.json",
         onDeleteFile: (fileName) => deletedFiles.push(fileName),
       });
@@ -131,7 +131,7 @@ describe("ManifestManager", () => {
 
     test("does not delete when noDelete is true", async () => {
       const deletedFiles: string[] = [];
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({
+      const { gitOps: mockGitOps } = createMockAuthenticatedGitOps({
         fileExists: () => true,
         onDeleteFile: (fileName) => deletedFiles.push(fileName),
       });
@@ -155,6 +155,73 @@ describe("ManifestManager", () => {
 
       assert.equal(deletedFiles.length, 0);
     });
+
+    test("attaches diffLines for JSON orphan deletions", () => {
+      const { gitOps: mockGitOps } = createMockAuthenticatedGitOps({
+        fileExists: () => true,
+        fileContent: '{"key": "value"}\n',
+      });
+      const { mock: mockLogger } = createMockLogger();
+
+      const manager = new ManifestManager();
+      const fileChanges = new Map<string, FileWriteResult>();
+
+      manager.deleteOrphans(
+        ["old-config.json"],
+        { dryRun: false, noDelete: false },
+        { gitOps: mockGitOps, log: mockLogger, fileChanges }
+      );
+
+      const entry = fileChanges.get("old-config.json");
+      assert.ok(entry);
+      assert.ok(entry.diffLines);
+      assert.ok(entry.diffLines.length > 0);
+      assert.ok(entry.diffLines.some((l) => l.startsWith("-")));
+    });
+
+    test("attaches diffLines for non-structured text orphan deletions", () => {
+      const { gitOps: mockGitOps } = createMockAuthenticatedGitOps({
+        fileExists: () => true,
+        fileContent: "#!/bin/bash\necho hello",
+      });
+      const { mock: mockLogger } = createMockLogger();
+
+      const manager = new ManifestManager();
+      const fileChanges = new Map<string, FileWriteResult>();
+
+      manager.deleteOrphans(
+        ["script.sh"],
+        { dryRun: false, noDelete: false },
+        { gitOps: mockGitOps, log: mockLogger, fileChanges }
+      );
+
+      const entry = fileChanges.get("script.sh");
+      assert.ok(entry);
+      assert.ok(entry.diffLines);
+      assert.ok(entry.diffLines.length > 0);
+      assert.ok(entry.diffLines.some((l) => l.startsWith("-")));
+    });
+
+    test("does not attach diffLines for binary orphan deletions", () => {
+      const { gitOps: mockGitOps } = createMockAuthenticatedGitOps({
+        fileExists: () => true,
+        fileContent: "binary-data",
+      });
+      const { mock: mockLogger } = createMockLogger();
+
+      const manager = new ManifestManager();
+      const fileChanges = new Map<string, FileWriteResult>();
+
+      manager.deleteOrphans(
+        ["logo.png"],
+        { dryRun: false, noDelete: false },
+        { gitOps: mockGitOps, log: mockLogger, fileChanges }
+      );
+
+      const entry = fileChanges.get("logo.png");
+      assert.ok(entry);
+      assert.equal(entry.diffLines, undefined);
+    });
   });
 
   describe("saveManifest", () => {
@@ -162,7 +229,7 @@ describe("ManifestManager", () => {
       const manager = new ManifestManager();
       const fileChanges = new Map<string, FileWriteResult>();
       const manifest = {
-        version: 3 as const,
+        version: 4 as const,
         configs: {
           "test-config": { files: ["file.json"] },
         },
@@ -174,11 +241,43 @@ describe("ManifestManager", () => {
       assert.equal(fileChanges.get(MANIFEST_FILENAME)?.action, "create");
     });
 
+    test("attaches diffLines when manifest is updated", () => {
+      const manager = new ManifestManager();
+      const fileChanges = new Map<string, FileWriteResult>();
+      const existingManifest = {
+        version: 4 as const,
+        configs: { old: { files: ["a.json"] } },
+      };
+      const newManifest = {
+        version: 4 as const,
+        configs: { new: { files: ["b.json"] } },
+      };
+
+      // Write existing manifest so manifestExisted = true
+      writeFileSync(
+        join(workDir, MANIFEST_FILENAME),
+        JSON.stringify(existingManifest, null, 2) + "\n"
+      );
+
+      manager.saveUpdatedManifest(
+        workDir,
+        newManifest,
+        existingManifest,
+        false,
+        fileChanges
+      );
+
+      const entry = fileChanges.get(MANIFEST_FILENAME);
+      assert.ok(entry);
+      assert.ok(entry.diffLines);
+      assert.ok(entry.diffLines.length > 0);
+    });
+
     test("does not save in dryRun mode", () => {
       const manager = new ManifestManager();
       const fileChanges = new Map<string, FileWriteResult>();
       const manifest = {
-        version: 3 as const,
+        version: 4 as const,
         configs: {
           "test-config": { files: ["file.json"] },
         },

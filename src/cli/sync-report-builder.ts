@@ -1,21 +1,16 @@
-// src/cli/sync-report-builder.ts
+import type { MergeMode } from "../config/index.js";
 import type {
   SyncReport,
   RepoFileChanges,
-  FileChange,
-} from "../output/sync-report.js";
-
-interface FileChangeInput {
-  path: string;
-  action: "create" | "update" | "delete";
-}
+  ReportFileChange,
+} from "../output/index.js";
 
 interface SyncResultInput {
   repoName: string;
   success: boolean;
-  fileChanges: FileChangeInput[];
+  fileChanges: ReportFileChange[];
   prUrl?: string;
-  mergeOutcome?: "manual" | "auto" | "force" | "direct";
+  mergeOutcome?: MergeMode;
   error?: string;
 }
 
@@ -26,10 +21,13 @@ export function buildSyncReport(results: SyncResultInput[]): SyncReport {
   };
 
   for (const result of results) {
-    const files: FileChange[] = result.fileChanges.map((f) => ({
-      path: f.path,
-      action: f.action,
-    }));
+    const files: ReportFileChange[] = result.fileChanges.map((f) => {
+      const entry: ReportFileChange = { path: f.path, action: f.action };
+      if (f.diffLines) {
+        entry.diffLines = f.diffLines;
+      }
+      return entry;
+    });
 
     // Count totals
     for (const file of files) {

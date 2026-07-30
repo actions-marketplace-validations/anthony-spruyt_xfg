@@ -1,93 +1,157 @@
 /**
  * Deep merge utilities for JSON configuration objects.
- * Supports configurable array merge strategies via $arrayMerge directive.
+ * Supports per-field array merge strategies via $arrayMerge + $values directives.
  */
 
-export type ArrayMergeStrategy = "replace" | "append" | "prepend";
+import { isPlainObject } from "../shared/type-guards.js";
 
 /**
- * Handler function type for array merge strategies.
+ * Candidate keys for matching array items by identity rather than index.
+ * Order matters — first key found across all items wins.
  */
-export type ArrayMergeHandler = (
+export const MATCH_KEY_CANDIDATES = ["type", "actor_id"] as const;
+
+/**
+ * Finds a key that uniquely identifies items in both arrays.
+ * Returns the first candidate key present in every item of both arrays, or undefined.
+ */
+export function findMatchKey(
   base: unknown[],
   overlay: unknown[]
-) => unknown[];
+): string | undefined {
+  if (base.length === 0 && overlay.length === 0) return undefined;
+
+  const hasKey = (item: unknown, key: string): boolean =>
+    isPlainObject(item) && key in (item as Record<string, unknown>);
+
+  for (const candidate of MATCH_KEY_CANDIDATES) {
+    if (
+      base.every((item) => hasKey(item, candidate)) &&
+      overlay.every((item) => hasKey(item, candidate))
+    ) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
 
 /**
- * Strategy map for array merge operations.
- * Extensible: add new strategies by adding to this map.
+ * Keys reserved for xfg merge directives.
+ * Only these are stripped during merge — standard $-prefixed keys
+ * like $schema, $id, $ref, $generated are preserved.
  */
-export const arrayMergeStrategies: Map<ArrayMergeStrategy, ArrayMergeHandler> =
+const XFG_DIRECTIVES = new Set(["$arrayMerge", "$values"]);
+
+export type ArrayMergeStrategy = "replace" | "append" | "prepend" | "merge";
+
+type ArrayMergeHandler = (
+  base: unknown[],
+  overlay: unknown[],
+  ctx: MergeContext
+) => unknown[];
+
+function mergeByKey(
+  base: unknown[],
+  overlay: unknown[],
+  matchKey: string,
+  ctx: MergeContext
+): unknown[] {
+  const baseByKey = new Map<
+    unknown,
+    { item: Record<string, unknown>; index: number }
+  >();
+  // findMatchKey guarantees every item in both arrays is a plain object with matchKey
+  for (let i = 0; i < base.length; i++) {
+    const item = base[i] as Record<string, unknown>;
+    const keyValue = item[matchKey];
+    if (keyValue !== undefined && !baseByKey.has(keyValue)) {
+      baseByKey.set(keyValue, { item, index: i });
+    }
+  }
+
+  const appended: unknown[] = [];
+
+  for (const overlayItem of overlay) {
+    const item = overlayItem as Record<string, unknown>;
+    const keyValue = item[matchKey];
+    const baseEntry = baseByKey.get(keyValue);
+    if (baseEntry) {
+      baseByKey.set(keyValue, {
+        item: deepMerge(baseEntry.item, item, ctx),
+        index: baseEntry.index,
+      });
+    } else {
+      appended.push(overlayItem);
+    }
+  }
+
+  const result: unknown[] = [];
+  for (let i = 0; i < base.length; i++) {
+    const item = base[i] as Record<string, unknown>;
+    const keyValue = item[matchKey];
+    const entry = baseByKey.get(keyValue);
+    if (entry && entry.index === i) {
+      result.push(entry.item);
+    } else {
+      result.push(item);
+    }
+  }
+
+  result.push(...appended);
+  return result;
+}
+
+const arrayMergeStrategies: Map<ArrayMergeStrategy, ArrayMergeHandler> =
   new Map([
     ["replace", (_base, overlay) => overlay],
     ["append", (base, overlay) => [...base, ...overlay]],
     ["prepend", (base, overlay) => [...overlay, ...base]],
+    [
+      "merge",
+      (base, overlay, ctx) => {
+        const matchKey = findMatchKey(base, overlay);
+        if (!matchKey) {
+          return [...base, ...overlay];
+        }
+        return mergeByKey(base, overlay, matchKey, ctx);
+      },
+    ],
   ]);
 
+/**
+ * Checks if a value is an unresolved $arrayMerge directive object
+ * (only contains $arrayMerge + $values keys, with a valid strategy and array values).
+ */
+function isUnresolvedDirective(
+  value: unknown
+): value is Record<string, unknown> & { $values: unknown[] } {
+  if (!isPlainObject(value)) return false;
+  const keys = Object.keys(value);
+  return (
+    keys.length === 2 &&
+    keys.every((k) => XFG_DIRECTIVES.has(k)) &&
+    typeof value.$arrayMerge === "string" &&
+    arrayMergeStrategies.has(value.$arrayMerge as ArrayMergeStrategy) &&
+    Array.isArray(value.$values)
+  );
+}
+
 export interface MergeContext {
-  arrayStrategies: Map<string, ArrayMergeStrategy>;
   defaultArrayStrategy: ArrayMergeStrategy;
 }
 
-/**
- * Check if a value is a plain object (not null, not array).
- */
-function isPlainObject(val: unknown): val is Record<string, unknown> {
-  return typeof val === "object" && val !== null && !Array.isArray(val);
-}
-
-/**
- * Merge two arrays based on the specified strategy.
- */
 function mergeArrays(
   base: unknown[],
   overlay: unknown[],
-  strategy: ArrayMergeStrategy
+  strategy: ArrayMergeStrategy,
+  ctx: MergeContext
 ): unknown[] {
   const handler = arrayMergeStrategies.get(strategy);
   if (handler) {
-    return handler(base, overlay);
+    return handler(base, overlay, ctx);
   }
-  // Fallback to replace for unknown strategies
   return overlay;
-}
-
-/**
- * Extract array values from an overlay object that uses the directive syntax:
- * { $arrayMerge: 'append', values: [1, 2, 3] }
- *
- * Or just return the array if it's already an array.
- */
-function extractArrayFromOverlay(overlay: unknown): unknown[] | null {
-  if (Array.isArray(overlay)) {
-    return overlay;
-  }
-
-  if (isPlainObject(overlay) && "values" in overlay) {
-    const values = overlay.values;
-    if (Array.isArray(values)) {
-      return values;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Get merge strategy from an overlay object's $arrayMerge directive.
- */
-function getStrategyFromOverlay(overlay: unknown): ArrayMergeStrategy | null {
-  if (isPlainObject(overlay) && "$arrayMerge" in overlay) {
-    const strategy = overlay.$arrayMerge;
-    if (
-      strategy === "replace" ||
-      strategy === "append" ||
-      strategy === "prepend"
-    ) {
-      return strategy;
-    }
-  }
-  return null;
 }
 
 /**
@@ -96,66 +160,58 @@ function getStrategyFromOverlay(overlay: unknown): ArrayMergeStrategy | null {
  * @param base - The base object
  * @param overlay - The overlay object (values override base)
  * @param ctx - Merge context with array strategies
- * @param path - Current path for strategy lookup (internal)
  */
 export function deepMerge(
   base: Record<string, unknown>,
   overlay: Record<string, unknown>,
-  ctx: MergeContext,
-  path: string = ""
+  ctx: MergeContext
 ): Record<string, unknown> {
   const result: Record<string, unknown> = { ...base };
 
-  // Check for $arrayMerge directive at this level (applies to child arrays)
-  const levelStrategy = getStrategyFromOverlay(overlay);
-
   for (const [key, overlayValue] of Object.entries(overlay)) {
     // Skip directive keys in output
-    if (key.startsWith("$")) continue;
+    if (XFG_DIRECTIVES.has(key)) continue;
 
-    const currentPath = path ? `${path}.${key}` : key;
     const baseValue = base[key];
 
-    // If overlay is an object with $arrayMerge directive for an array field
-    if (isPlainObject(overlayValue) && "$arrayMerge" in overlayValue) {
-      const strategy = getStrategyFromOverlay(overlayValue);
-      const overlayArray = extractArrayFromOverlay(overlayValue);
+    // If base is an unresolved directive (from a previous layer with no base array),
+    // resolve it to its $values array before proceeding with merge logic.
+    const resolvedBase = isUnresolvedDirective(baseValue)
+      ? baseValue.$values
+      : baseValue;
 
-      if (strategy && overlayArray && Array.isArray(baseValue)) {
-        result[key] = mergeArrays(baseValue, overlayArray, strategy);
+    // Per-field $arrayMerge + $values directive
+    if (isPlainObject(overlayValue) && "$arrayMerge" in overlayValue) {
+      const strategy = overlayValue.$arrayMerge;
+      const values = overlayValue.$values;
+
+      if (
+        (strategy === "replace" ||
+          strategy === "append" ||
+          strategy === "prepend" ||
+          strategy === "merge") &&
+        Array.isArray(values) &&
+        Array.isArray(resolvedBase)
+      ) {
+        result[key] = mergeArrays(resolvedBase, values, strategy, ctx);
         continue;
       }
     }
 
-    // Both are arrays - apply strategy
-    if (Array.isArray(baseValue) && Array.isArray(overlayValue)) {
-      // Check for level-specific strategy, then path-specific, then default
-      const strategy =
-        levelStrategy ??
-        ctx.arrayStrategies.get(currentPath) ??
-        ctx.defaultArrayStrategy;
-      result[key] = mergeArrays(baseValue, overlayValue, strategy);
+    // Both are arrays — use default strategy
+    if (Array.isArray(resolvedBase) && Array.isArray(overlayValue)) {
+      result[key] = mergeArrays(
+        resolvedBase,
+        overlayValue,
+        ctx.defaultArrayStrategy,
+        ctx
+      );
       continue;
     }
 
-    // Both are plain objects - recurse
-    if (isPlainObject(baseValue) && isPlainObject(overlayValue)) {
-      // Extract $arrayMerge for child paths if present
-      if ("$arrayMerge" in overlayValue) {
-        const childStrategy = getStrategyFromOverlay(overlayValue);
-        if (childStrategy) {
-          // Apply to all immediate child arrays
-          for (const childKey of Object.keys(overlayValue)) {
-            if (!childKey.startsWith("$")) {
-              const childPath = currentPath
-                ? `${currentPath}.${childKey}`
-                : childKey;
-              ctx.arrayStrategies.set(childPath, childStrategy);
-            }
-          }
-        }
-      }
-      result[key] = deepMerge(baseValue, overlayValue, ctx, currentPath);
+    // Both are plain objects — recurse
+    if (isPlainObject(resolvedBase) && isPlainObject(overlayValue)) {
+      result[key] = deepMerge(resolvedBase, overlayValue, ctx);
       continue;
     }
 
@@ -167,8 +223,13 @@ export function deepMerge(
 }
 
 /**
- * Strip merge directive keys ($arrayMerge, $override, etc.) from an object.
+ * Strip xfg merge directive keys ($arrayMerge, $values) from an object.
  * Works recursively on nested objects and arrays.
+ * Standard $-prefixed keys ($schema, $id, $ref, etc.) are preserved.
+ *
+ * When an unresolved directive object is found (only contains $arrayMerge + $values),
+ * it is replaced with the $values array. This handles the case where a directive
+ * had no base array to merge with.
  */
 export function stripMergeDirectives(
   obj: Record<string, unknown>
@@ -176,11 +237,18 @@ export function stripMergeDirectives(
   const result: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(obj)) {
-    // Skip all $-prefixed keys (reserved for directives)
-    if (key.startsWith("$")) continue;
+    // Skip xfg directive keys only
+    if (XFG_DIRECTIVES.has(key)) continue;
 
     if (isPlainObject(value)) {
-      result[key] = stripMergeDirectives(value);
+      if (isUnresolvedDirective(value)) {
+        // Resolve to the $values array, stripping directives from items
+        result[key] = value.$values.map((item) =>
+          isPlainObject(item) ? stripMergeDirectives(item) : item
+        );
+      } else {
+        result[key] = stripMergeDirectives(value);
+      }
     } else if (Array.isArray(value)) {
       result[key] = value.map((item) =>
         isPlainObject(item) ? stripMergeDirectives(item) : item
@@ -193,14 +261,10 @@ export function stripMergeDirectives(
   return result;
 }
 
-/**
- * Create a default merge context.
- */
 export function createMergeContext(
   defaultStrategy: ArrayMergeStrategy = "replace"
 ): MergeContext {
   return {
-    arrayStrategies: new Map(),
     defaultArrayStrategy: defaultStrategy,
   };
 }
@@ -209,9 +273,6 @@ export function createMergeContext(
 // Text Content Utilities
 // =============================================================================
 
-/**
- * Check if content is text type (string or string[]).
- */
 export function isTextContent(content: unknown): content is string | string[] {
   return (
     typeof content === "string" ||
@@ -236,24 +297,19 @@ export function mergeTextContent(
     return overlay;
   }
 
-  // If overlay is an array
-  if (Array.isArray(overlay)) {
-    // If base is also an array, apply merge strategy
-    if (Array.isArray(base)) {
-      switch (strategy) {
-        case "append":
-          return [...base, ...overlay];
-        case "prepend":
-          return [...overlay, ...base];
-        case "replace":
-        default:
-          return overlay;
-      }
+  // If base is also an array, apply merge strategy
+  if (Array.isArray(base)) {
+    switch (strategy) {
+      case "append":
+      case "merge":
+        return [...base, ...overlay];
+      case "prepend":
+        return [...overlay, ...base];
+      case "replace":
+      default:
+        return overlay;
     }
-    // Base is string, overlay is array - overlay replaces
-    return overlay;
   }
-
-  // Fallback (shouldn't reach here with proper types)
+  // Base is string, overlay is array - overlay replaces
   return overlay;
 }

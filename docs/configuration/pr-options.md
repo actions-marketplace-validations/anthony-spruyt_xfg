@@ -4,12 +4,14 @@ Configure how PRs are handled after creation.
 
 ## PR Options Fields
 
-| Field           | Description                                                                           | Default  |
-| --------------- | ------------------------------------------------------------------------------------- | -------- |
-| `merge`         | Merge mode: `manual` (leave open), `auto` (merge when checks pass), `force`, `direct` | `auto`   |
-| `mergeStrategy` | How to merge: `merge`, `squash`, `rebase`                                             | `squash` |
-| `deleteBranch`  | Delete source branch after merge                                                      | `true`   |
-| `bypassReason`  | Reason for bypassing policies (Azure DevOps only, required for `force`)               | -        |
+| Field           | Description                                                                                                    | Default  |
+| --------------- | -------------------------------------------------------------------------------------------------------------- | -------- |
+| `merge`         | Merge mode: `manual` (leave open), `auto` (merge when checks pass), `force`, `direct`                          | `auto`   |
+| `mergeStrategy` | How to merge: `merge`, `squash`, `rebase`                                                                      | `squash` |
+| `deleteBranch`  | Delete source branch after merge                                                                               | `true`   |
+| `bypassReason`  | Reason for bypassing policies (Azure DevOps only, required for `force`)                                        | -        |
+| `labels`        | Labels to apply to created PRs (GitHub only, more platforms coming)                                            | -        |
+| `branch`        | Branch name for sync PRs. Per-repo overrides group, group overrides global. CLI `--branch` flag overrides all. | -        |
 
 ## Merge Modes
 
@@ -49,6 +51,52 @@ repos:
     prOptions:
       merge: force
 ```
+
+## PR Labels
+
+Apply labels to PRs automatically:
+
+```yaml
+prOptions:
+  labels: ["config-sync", "automated"]
+
+repos:
+  # Uses global labels
+  - git: git@github.com:org/frontend.git
+
+  # Override with repo-specific labels (replaces global)
+  - git: git@github.com:org/critical.git
+    prOptions:
+      labels: ["critical-config", "urgent"]
+
+  # Clear labels for this repo
+  - git: git@github.com:org/no-labels.git
+    prOptions:
+      labels: []
+```
+
+**Note:** Labels must already exist on the target repository. If a label doesn't exist, the PR creation will fail. Currently supported on GitHub only.
+
+## PR Branch Name
+
+Set a custom branch name for sync PRs:
+
+```yaml
+# Global branch name
+prOptions:
+  branch: chore/sync-config
+
+repos:
+  # Uses global branch name
+  - git: git@github.com:org/frontend.git
+
+  # Per-repo override
+  - git: git@github.com:org/special.git
+    prOptions:
+      branch: chore/sync-repo-specific
+```
+
+When `branch` is not set, the branch name is auto-generated from the synced file names (e.g., `chore/sync-prettierrc`). The CLI `--branch` flag overrides all config values.
 
 ## CLI Override
 
@@ -97,5 +145,7 @@ gh repo edit org/repo --enable-auto-merge
 
 1. CLI flags (highest)
 2. Per-repo `prOptions`
-3. Global `prOptions`
-4. Built-in defaults (lowest)
+3. Conditional group `prOptions` (applied in array order)
+4. Group `prOptions` (applied in order, later groups override earlier ones)
+5. Global `prOptions`
+6. Built-in defaults (lowest)

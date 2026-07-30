@@ -3,30 +3,42 @@ import { strict as assert } from "node:assert";
 import {
   GitHubRulesetStrategy,
   configToGitHub,
-  GitHubRuleset,
 } from "../../../../src/settings/rulesets/github-ruleset-strategy.js";
+import type { GitHubRuleset } from "../../../../src/settings/rulesets/types.js";
 import type { Ruleset } from "../../../../src/config/index.js";
 import type {
   GitHubRepoInfo,
   AzureDevOpsRepoInfo,
-} from "../../../../src/shared/repo-detector.js";
+} from "../../../../src/repo/index.js";
 import type {
   ICommandExecutor,
   ExecOptions,
 } from "../../../../src/shared/command-executor.js";
 
-// Mock executor that records commands and returns configured responses
+interface CallRecord {
+  executable: string;
+  args: string[];
+  cwd: string;
+  options?: ExecOptions;
+}
+
+// Mock executor that records calls and returns configured responses
 class MockExecutor implements ICommandExecutor {
-  commands: string[] = [];
+  calls: CallRecord[] = [];
   responses: Map<string, string> = new Map();
   defaultResponse = "{}";
 
-  async exec(command: string, _cwd: string): Promise<string> {
-    this.commands.push(command);
+  async exec(
+    executable: string,
+    args: string[],
+    cwd: string,
+    options?: ExecOptions
+  ): Promise<string> {
+    this.calls.push({ executable, args, cwd, options });
 
-    // Find matching response by endpoint pattern
+    // Find matching response by checking if any arg includes the pattern
     for (const [pattern, response] of this.responses) {
-      if (command.includes(pattern)) {
+      if (args.some((a) => a.includes(pattern))) {
         return response;
       }
     }
@@ -38,7 +50,7 @@ class MockExecutor implements ICommandExecutor {
   }
 
   reset(): void {
-    this.commands = [];
+    this.calls = [];
     this.responses.clear();
   }
 }
@@ -66,7 +78,10 @@ describe("GitHubRulesetStrategy", () => {
 
   beforeEach(() => {
     mockExecutor = new MockExecutor();
-    strategy = new GitHubRulesetStrategy(mockExecutor);
+    strategy = new GitHubRulesetStrategy(mockExecutor, {
+      retries: 0,
+      cwd: "/test",
+    });
   });
 
   describe("list", () => {
@@ -92,8 +107,11 @@ describe("GitHubRulesetStrategy", () => {
       assert.equal(result.length, 2);
       assert.equal(result[0].name, "pr-rules");
       assert.equal(result[1].name, "release-rules");
+      assert.strictEqual(mockExecutor.calls[0].executable, "gh");
       assert.ok(
-        mockExecutor.commands[0].includes("/repos/test-org/test-repo/rulesets")
+        mockExecutor.calls[0].args.some((a) =>
+          a.includes("/repos/test-org/test-repo/rulesets")
+        )
       );
     });
 
@@ -109,8 +127,11 @@ describe("GitHubRulesetStrategy", () => {
 
       await strategy.list(mockGitHubRepo, { token: "test-token" });
 
-      assert.ok(mockExecutor.commands[0].includes("GH_TOKEN="));
-      assert.ok(mockExecutor.commands[0].includes("test-token"));
+      assert.strictEqual(
+        mockExecutor.calls[0].options?.env?.GH_TOKEN,
+        "test-token",
+        "Should pass GH_TOKEN via env options"
+      );
     });
 
     test("uses custom host for GitHub Enterprise", async () => {
@@ -123,11 +144,11 @@ describe("GitHubRulesetStrategy", () => {
       await strategy.list(gheRepo, { host: "github.mycompany.com" });
 
       assert.ok(
-        mockExecutor.commands[0].includes("--hostname"),
+        mockExecutor.calls[0].args.includes("--hostname"),
         "Should include --hostname flag"
       );
       assert.ok(
-        mockExecutor.commands[0].includes("github.mycompany.com"),
+        mockExecutor.calls[0].args.includes("github.mycompany.com"),
         "Should include the custom host"
       );
     });
@@ -149,8 +170,8 @@ describe("GitHubRulesetStrategy", () => {
       assert.equal(result.id, 123);
       assert.equal(result.name, "pr-rules");
       assert.ok(
-        mockExecutor.commands[0].includes(
-          "/repos/test-org/test-repo/rulesets/123"
+        mockExecutor.calls[0].args.some((a) =>
+          a.includes("/repos/test-org/test-repo/rulesets/123")
         )
       );
     });
@@ -171,7 +192,7 @@ describe("GitHubRulesetStrategy", () => {
         target: "branch",
         enforcement: "active",
       };
-      mockExecutor.setResponse("POST", JSON.stringify(createdRuleset));
+      mockExecutor.setResponse("/rulesets", JSON.stringify(createdRuleset));
 
       const ruleset: Ruleset = {
         target: "branch",
@@ -179,22 +200,22 @@ describe("GitHubRulesetStrategy", () => {
         rules: [{ type: "pull_request" }],
       };
 
-      const result = await strategy.create(
-        mockGitHubRepo,
-        "new-rules",
-        ruleset
-      );
+      await strategy.create(mockGitHubRepo, {
+        name: "new-rules",
+        ruleset,
+      });
 
-      assert.equal(result.id, 456);
-      assert.equal(result.name, "new-rules");
-      assert.ok(mockExecutor.commands[0].includes("-X POST"));
+      assert.ok(mockExecutor.calls[0].args.includes("-X"));
+      assert.ok(mockExecutor.calls[0].args.includes("POST"));
       assert.ok(
-        mockExecutor.commands[0].includes("/repos/test-org/test-repo/rulesets")
+        mockExecutor.calls[0].args.some((a) =>
+          a.includes("/repos/test-org/test-repo/rulesets")
+        )
       );
     });
 
-    test("includes payload in request", async () => {
-      mockExecutor.setResponse("POST", '{"id": 1, "name": "test"}');
+    test("includes payload via input option", async () => {
+      mockExecutor.setResponse("/rulesets", '{"id": 1, "name": "test"}');
 
       const ruleset: Ruleset = {
         target: "branch",
@@ -206,16 +227,28 @@ describe("GitHubRulesetStrategy", () => {
         },
       };
 
-      await strategy.create(mockGitHubRepo, "test-rules", ruleset);
+      await strategy.create(mockGitHubRepo, {
+        name: "test-rules",
+        ruleset,
+      });
 
-      const command = mockExecutor.commands[0];
-      assert.ok(command.includes("--input -"), "Should use stdin for payload");
-      assert.ok(command.includes("echo"), "Should use echo pipe pattern");
+      assert.ok(
+        mockExecutor.calls[0].options?.input,
+        "Should pass payload via options.input"
+      );
+      assert.ok(
+        mockExecutor.calls[0].args.includes("--input"),
+        "Should include --input flag"
+      );
     });
 
     test("throws error for non-GitHub repos", async () => {
       await assert.rejects(
-        () => strategy.create(mockAzureRepo, "test", { target: "branch" }),
+        () =>
+          strategy.create(mockAzureRepo, {
+            name: "test",
+            ruleset: { target: "branch" },
+          }),
         /GitHub Ruleset strategy requires GitHub repositories/
       );
     });
@@ -229,33 +262,36 @@ describe("GitHubRulesetStrategy", () => {
         target: "branch",
         enforcement: "disabled",
       };
-      mockExecutor.setResponse("PUT", JSON.stringify(updatedRuleset));
+      mockExecutor.setResponse("/rulesets/123", JSON.stringify(updatedRuleset));
 
       const ruleset: Ruleset = {
         target: "branch",
         enforcement: "disabled",
       };
 
-      const result = await strategy.update(
-        mockGitHubRepo,
-        123,
-        "updated-rules",
-        ruleset
-      );
+      await strategy.update(mockGitHubRepo, {
+        rulesetId: 123,
+        name: "updated-rules",
+        ruleset,
+      });
 
-      assert.equal(result.id, 123);
-      assert.equal(result.enforcement, "disabled");
-      assert.ok(mockExecutor.commands[0].includes("-X PUT"));
+      assert.ok(mockExecutor.calls[0].args.includes("-X"));
+      assert.ok(mockExecutor.calls[0].args.includes("PUT"));
       assert.ok(
-        mockExecutor.commands[0].includes(
-          "/repos/test-org/test-repo/rulesets/123"
+        mockExecutor.calls[0].args.some((a) =>
+          a.includes("/repos/test-org/test-repo/rulesets/123")
         )
       );
     });
 
     test("throws error for non-GitHub repos", async () => {
       await assert.rejects(
-        () => strategy.update(mockAzureRepo, 123, "test", { target: "branch" }),
+        () =>
+          strategy.update(mockAzureRepo, {
+            rulesetId: 123,
+            name: "test",
+            ruleset: { target: "branch" },
+          }),
         /GitHub Ruleset strategy requires GitHub repositories/
       );
     });
@@ -263,14 +299,15 @@ describe("GitHubRulesetStrategy", () => {
 
   describe("delete", () => {
     test("deletes a ruleset", async () => {
-      mockExecutor.setResponse("DELETE", "");
+      mockExecutor.setResponse("/rulesets/123", "");
 
       await strategy.delete(mockGitHubRepo, 123);
 
-      assert.ok(mockExecutor.commands[0].includes("-X DELETE"));
+      assert.ok(mockExecutor.calls[0].args.includes("-X"));
+      assert.ok(mockExecutor.calls[0].args.includes("DELETE"));
       assert.ok(
-        mockExecutor.commands[0].includes(
-          "/repos/test-org/test-repo/rulesets/123"
+        mockExecutor.calls[0].args.some((a) =>
+          a.includes("/repos/test-org/test-repo/rulesets/123")
         )
       );
     });
@@ -288,11 +325,12 @@ describe("GitHubRulesetStrategy", () => {
       let callCount = 0;
       const executor: ICommandExecutor = {
         async exec(
-          command: string,
+          _executable: string,
+          args: string[],
           _cwd: string,
           _options?: ExecOptions
         ): Promise<string> {
-          if (command.includes("/rulesets")) {
+          if (args.some((a) => a.includes("/rulesets"))) {
             callCount++;
             if (callCount === 1) {
               throw new Error("Connection timed out");
@@ -303,7 +341,10 @@ describe("GitHubRulesetStrategy", () => {
         },
       };
 
-      const retryStrategy = new GitHubRulesetStrategy(executor);
+      const retryStrategy = new GitHubRulesetStrategy(executor, {
+        retries: 1,
+        cwd: "/test",
+      });
       const result = await retryStrategy.list(mockGitHubRepo);
 
       assert.deepEqual(result, []);
@@ -314,11 +355,12 @@ describe("GitHubRulesetStrategy", () => {
       let callCount = 0;
       const executor: ICommandExecutor = {
         async exec(
-          command: string,
+          _executable: string,
+          args: string[],
           _cwd: string,
           _options?: ExecOptions
         ): Promise<string> {
-          if (command.includes("/rulesets")) {
+          if (args.some((a) => a.includes("/rulesets"))) {
             callCount++;
             throw new Error("gh: Not Found (HTTP 404)");
           }
@@ -326,7 +368,10 @@ describe("GitHubRulesetStrategy", () => {
         },
       };
 
-      const retryStrategy = new GitHubRulesetStrategy(executor);
+      const retryStrategy = new GitHubRulesetStrategy(executor, {
+        retries: 1,
+        cwd: "/test",
+      });
       await assert.rejects(
         async () => retryStrategy.list(mockGitHubRepo),
         /404/

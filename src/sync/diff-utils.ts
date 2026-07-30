@@ -1,39 +1,11 @@
-import chalk from "chalk";
+export type { FileStatus } from "../shared/file-status.js";
+export { formatStatusBadge } from "../shared/file-status.js";
+import { formatDiffLine } from "../shared/diff-format.js";
+import type { FileStatus } from "../shared/file-status.js";
 
-export type FileStatus = "NEW" | "MODIFIED" | "UNCHANGED" | "DELETED";
-
-/**
- * Determines file status based on existence and change detection.
- */
 export function getFileStatus(exists: boolean, changed: boolean): FileStatus {
   if (!exists) return "NEW";
   return changed ? "MODIFIED" : "UNCHANGED";
-}
-
-/**
- * Format a status badge with appropriate color.
- */
-export function formatStatusBadge(status: FileStatus): string {
-  switch (status) {
-    case "NEW":
-      return chalk.green("[NEW]");
-    case "MODIFIED":
-      return chalk.yellow("[MODIFIED]");
-    case "UNCHANGED":
-      return chalk.gray("[UNCHANGED]");
-    case "DELETED":
-      return chalk.red("[DELETED]");
-  }
-}
-
-/**
- * Format a single diff line with appropriate color.
- */
-export function formatDiffLine(line: string): string {
-  if (line.startsWith("+")) return chalk.green(line);
-  if (line.startsWith("-")) return chalk.red(line);
-  if (line.startsWith("@@")) return chalk.cyan(line);
-  return line;
 }
 
 interface DiffHunk {
@@ -44,48 +16,129 @@ interface DiffHunk {
   lines: string[];
 }
 
+const BINARY_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".ico",
+  ".webp",
+  ".svg",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+  ".otf",
+  ".pdf",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".bz2",
+  ".7z",
+  ".rar",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".bin",
+  ".dat",
+  ".db",
+  ".sqlite",
+  ".jar",
+  ".class",
+  ".pyc",
+  ".wasm",
+  ".mp3",
+  ".mp4",
+  ".wav",
+  ".avi",
+  ".mov",
+  ".mkv",
+]);
+
 /**
- * Generate a unified diff between old and new content.
- * Returns an array of formatted diff lines.
+ * Check if a file is likely binary based on its extension.
  */
-export function generateDiff(
+export function isBinaryFile(fileName: string): boolean {
+  const ext = fileName.slice(fileName.lastIndexOf(".")).toLowerCase();
+  return BINARY_EXTENSIONS.has(ext);
+}
+
+/**
+ * Compute a unified diff between old and new content.
+ * Returns raw diff lines (no ANSI formatting).
+ *
+ * - oldContent === null → new file (all additions)
+ * - newContent === null → deleted file (all removals)
+ * - both null → empty array
+ */
+export function computeUnifiedDiff(
   oldContent: string | null,
-  newContent: string,
-  fileName: string,
+  newContent: string | null,
   contextLines: number = 3
 ): string[] {
-  const oldLines = oldContent ? oldContent.split("\n") : [];
-  const newLines = newContent.split("\n");
+  if (oldContent === null && newContent === null) {
+    return [];
+  }
 
-  // For new files, show all lines as additions
+  // New file: all additions
   if (oldContent === null) {
-    const result: string[] = [];
-    for (const line of newLines) {
-      result.push(formatDiffLine(`+${line}`));
+    const newLines = newContent!.split("\n");
+    // Filter trailing empty string from split
+    const lines =
+      newLines[newLines.length - 1] === "" ? newLines.slice(0, -1) : newLines;
+    if (lines.length === 0) return [];
+    const result: string[] = [`@@ -0,0 +1,${lines.length} @@`];
+    for (const line of lines) {
+      result.push(`+${line}`);
     }
     return result;
   }
 
-  // Simple LCS-based diff algorithm
-  const hunks = computeDiffHunks(oldLines, newLines, contextLines);
-
-  if (hunks.length === 0) {
-    return [];
+  // Deleted file: all removals
+  if (newContent === null) {
+    const oldLines = oldContent.split("\n");
+    const lines =
+      oldLines[oldLines.length - 1] === "" ? oldLines.slice(0, -1) : oldLines;
+    if (lines.length === 0) return [];
+    const result: string[] = [`@@ -1,${lines.length} +0,0 @@`];
+    for (const line of lines) {
+      result.push(`-${line}`);
+    }
+    return result;
   }
+
+  const oldLines = oldContent.split("\n");
+  const newLines = newContent.split("\n");
+
+  const hunks = computeDiffHunks(oldLines, newLines, contextLines);
+  if (hunks.length === 0) return [];
 
   const result: string[] = [];
   for (const hunk of hunks) {
     result.push(
-      formatDiffLine(
-        `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`
-      )
+      `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`
     );
     for (const line of hunk.lines) {
-      result.push(formatDiffLine(line));
+      result.push(line);
     }
   }
-
   return result;
+}
+
+/**
+ * Generate a unified diff between old and new content.
+ * Returns an array of formatted (chalk-colored) diff lines.
+ */
+export function generateDiff(
+  oldContent: string | null,
+  newContent: string,
+  contextLines: number = 3
+): string[] {
+  return computeUnifiedDiff(oldContent, newContent, contextLines).map(
+    formatDiffLine
+  );
 }
 
 /**
@@ -97,14 +150,12 @@ function computeDiffHunks(
   newLines: string[],
   contextLines: number
 ): DiffHunk[] {
-  // Compute edit script using LCS
   const editScript = computeEditScript(oldLines, newLines);
 
   if (editScript.length === 0) {
     return [];
   }
 
-  // Group edits into hunks with context
   return groupIntoHunks(editScript, oldLines, newLines, contextLines);
 }
 
@@ -120,7 +171,6 @@ function computeEditScript(oldLines: string[], newLines: string[]): EditOp[] {
   const m = oldLines.length;
   const n = newLines.length;
 
-  // Build LCS table
   const lcs: number[][] = Array(m + 1)
     .fill(null)
     .map(() => Array(n + 1).fill(0));
@@ -135,7 +185,6 @@ function computeEditScript(oldLines: string[], newLines: string[]): EditOp[] {
     }
   }
 
-  // Backtrack to find edit script
   const ops: EditOp[] = [];
   let i = m;
   let j = n;
@@ -166,7 +215,6 @@ function groupIntoHunks(
   newLines: string[],
   contextLines: number
 ): DiffHunk[] {
-  // Find ranges of changes
   const changeRanges: { start: number; end: number }[] = [];
   let inChange = false;
   let changeStart = 0;
@@ -191,7 +239,6 @@ function groupIntoHunks(
     return [];
   }
 
-  // Merge ranges that are close together (within 2*contextLines)
   const mergedRanges: { start: number; end: number }[] = [];
   let currentRange = { ...changeRanges[0] };
 
@@ -264,16 +311,10 @@ export interface DiffStats {
   deletedCount: number;
 }
 
-/**
- * Create an empty diff stats object.
- */
 export function createDiffStats(): DiffStats {
   return { newCount: 0, modifiedCount: 0, unchangedCount: 0, deletedCount: 0 };
 }
 
-/**
- * Increment the appropriate counter in diff stats.
- */
 export function incrementDiffStats(stats: DiffStats, status: FileStatus): void {
   switch (status) {
     case "NEW":
@@ -288,5 +329,9 @@ export function incrementDiffStats(stats: DiffStats, status: FileStatus): void {
     case "DELETED":
       stats.deletedCount++;
       break;
+    default: {
+      const _: never = status;
+      throw new Error(`Unknown FileStatus: ${String(_)}`);
+    }
   }
 }

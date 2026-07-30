@@ -1,13 +1,19 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { FileContent, ContentValue } from "../config/types.js";
-import { convertContentToString } from "../config/formatter.js";
-import { interpolateXfgContent } from "./xfg-template.js";
 import {
-  getFileStatus,
+  convertContentToString,
+  type FileContent,
+  type ContentValue,
+} from "../config/index.js";
+import { interpolateXfgContent } from "../shared/xfg-template.js";
+import {
   generateDiff,
   createDiffStats,
   incrementDiffStats,
+  computeUnifiedDiff,
+  isBinaryFile,
+  type FileStatus,
+  type DiffStats,
 } from "./diff-utils.js";
 import type {
   IFileWriter,
@@ -22,7 +28,7 @@ import type {
  * .sh files are auto-executable unless explicit executable: false is set.
  * Non-.sh files are executable only if executable: true is explicitly set.
  */
-export function shouldBeExecutable(file: FileContent): boolean {
+function shouldBeExecutable(file: FileContent): boolean {
   const isShellScript = file.fileName.endsWith(".sh");
 
   if (file.executable !== undefined) {
@@ -48,24 +54,71 @@ export class FileWriter implements IFileWriter {
     ctx: FileWriteContext,
     deps: FileWriterDeps
   ): Promise<FileWriteAllResult> {
+    const fileChanges = new Map<string, FileWriteResult>();
+    const diffStats = createDiffStats();
+    const modeCache = new Map<string, "100755" | "100644" | null>();
+
+    for (const file of files) {
+      await this.processOneFile(
+        file,
+        ctx,
+        deps,
+        fileChanges,
+        diffStats,
+        modeCache
+      );
+    }
+
+    await this.applyExecutablePermissions(
+      files,
+      fileChanges,
+      modeCache,
+      ctx,
+      deps
+    );
+
+    return { fileChanges, diffStats };
+  }
+
+  private async processOneFile(
+    file: FileContent,
+    ctx: FileWriteContext,
+    deps: FileWriterDeps,
+    fileChanges: Map<string, FileWriteResult>,
+    diffStats: DiffStats,
+    modeCache: Map<string, "100755" | "100644" | null>
+  ): Promise<void> {
     const { repoInfo, baseBranch, workDir, dryRun } = ctx;
     const { gitOps, log } = deps;
 
-    const fileChanges = new Map<string, FileWriteResult>();
-    const diffStats = createDiffStats();
+    if (file.createOnly) {
+      const existsOnBase = await gitOps.fileExistsOnBranch(
+        file.fileName,
+        baseBranch
+      );
+      if (existsOnBase) {
+        const desiredMode: "100755" | "100644" = shouldBeExecutable(file)
+          ? "100755"
+          : "100644";
+        const currentMode = await gitOps.getFileMode(file.fileName);
+        modeCache.set(file.fileName, currentMode);
+        const modeDiffers = currentMode !== null && currentMode !== desiredMode;
 
-    // Step 1: Process each file
-    for (const file of files) {
-      const filePath = join(workDir, file.fileName);
-      const fileExistsLocal = existsSync(filePath);
-
-      // Handle createOnly - check against BASE branch
-      if (file.createOnly) {
-        const existsOnBase = await gitOps.fileExistsOnBranch(
-          file.fileName,
-          baseBranch
-        );
-        if (existsOnBase) {
+        if (modeDiffers) {
+          fileChanges.set(file.fileName, {
+            fileName: file.fileName,
+            content: null,
+            action: "update",
+            mode: desiredMode,
+            modeOnly: true,
+          });
+          incrementDiffStats(diffStats, "MODIFIED");
+          if (dryRun) {
+            log.info(
+              `Would change mode: ${file.fileName} ${currentMode} -> ${desiredMode}`
+            );
+          }
+        } else {
           log.info(
             `Skipping ${file.fileName} (createOnly: exists on ${baseBranch})`
           );
@@ -74,80 +127,129 @@ export class FileWriter implements IFileWriter {
             content: null,
             action: "skip",
           });
-          continue;
         }
-      }
-
-      log.info(`Writing ${file.fileName}...`);
-
-      // Apply xfg templating if enabled
-      let contentToWrite: ContentValue | null = file.content;
-      if (file.template && contentToWrite !== null) {
-        contentToWrite = interpolateXfgContent(
-          contentToWrite,
-          {
-            repoInfo,
-            fileName: file.fileName,
-            vars: file.vars,
-          },
-          { strict: true }
-        );
-      }
-
-      const fileContent = convertContentToString(
-        contentToWrite,
-        file.fileName,
-        {
-          header: file.header,
-          schemaUrl: file.schemaUrl,
-        }
-      );
-
-      // Determine action type (create vs update) BEFORE writing
-      const action: "create" | "update" = fileExistsLocal ? "update" : "create";
-
-      // Check if file would change
-      const existingContent = gitOps.getFileContent(file.fileName);
-      const changed = gitOps.wouldChange(file.fileName, fileContent);
-
-      if (changed) {
-        fileChanges.set(file.fileName, {
-          fileName: file.fileName,
-          content: fileContent,
-          action,
-        });
-      }
-
-      if (dryRun) {
-        // In dry-run, show diff but don't write
-        const status = getFileStatus(existingContent !== null, changed);
-        incrementDiffStats(diffStats, status);
-
-        const diffLines = generateDiff(
-          existingContent,
-          fileContent,
-          file.fileName
-        );
-        log.fileDiff(file.fileName, status, diffLines);
-      } else {
-        // Write the file
-        gitOps.writeFile(file.fileName, fileContent);
+        return;
       }
     }
 
-    // Step 2: Set executable permissions (skip skipped files)
+    log.info(`Writing ${file.fileName}...`);
+
+    const fileContent = this.resolveContent(file, repoInfo);
+    const fileExistsLocal = existsSync(join(workDir, file.fileName));
+    const action: "create" | "update" = fileExistsLocal ? "update" : "create";
+    const existingContent = gitOps.getFileContent(file.fileName);
+    const changed = gitOps.wouldChange(file.fileName, fileContent);
+
+    const desiredMode: "100755" | "100644" = shouldBeExecutable(file)
+      ? "100755"
+      : "100644";
+    const currentMode = await gitOps.getFileMode(file.fileName);
+    modeCache.set(file.fileName, currentMode);
+    const modeDiffers = currentMode !== null && currentMode !== desiredMode;
+
+    if (changed) {
+      const writeResult: FileWriteResult = {
+        fileName: file.fileName,
+        content: fileContent,
+        action,
+        ...(desiredMode === "100755" || modeDiffers
+          ? { mode: desiredMode }
+          : {}),
+      };
+
+      if (!isBinaryFile(file.fileName)) {
+        writeResult.diffLines = computeUnifiedDiff(
+          existingContent,
+          fileContent
+        );
+      }
+
+      fileChanges.set(file.fileName, writeResult);
+    } else if (modeDiffers) {
+      fileChanges.set(file.fileName, {
+        fileName: file.fileName,
+        content: null,
+        action: "update",
+        mode: desiredMode,
+        modeOnly: true,
+      });
+    }
+
+    if (dryRun) {
+      if (changed) {
+        const status: FileStatus =
+          existingContent !== null ? "MODIFIED" : "NEW";
+        incrementDiffStats(diffStats, status);
+        const diffLines = generateDiff(existingContent, fileContent);
+        log.fileDiff(file.fileName, status, diffLines);
+      } else if (modeDiffers) {
+        incrementDiffStats(diffStats, "MODIFIED");
+        log.info(
+          `Would change mode: ${file.fileName} ${currentMode} -> ${desiredMode}`
+        );
+      }
+    } else if (changed) {
+      incrementDiffStats(diffStats, action === "create" ? "NEW" : "MODIFIED");
+      gitOps.writeFile(file.fileName, fileContent);
+    } else if (modeDiffers) {
+      incrementDiffStats(diffStats, "MODIFIED");
+    }
+  }
+
+  private resolveContent(
+    file: FileContent,
+    repoInfo: FileWriteContext["repoInfo"]
+  ): string {
+    let contentToWrite: ContentValue | null = file.content;
+    if (file.template && contentToWrite !== null) {
+      contentToWrite = interpolateXfgContent(
+        contentToWrite,
+        {
+          repoInfo,
+          fileName: file.fileName,
+          vars: file.vars,
+        },
+        { strict: true }
+      );
+    }
+
+    return convertContentToString(contentToWrite, file.fileName, {
+      header: file.header,
+      schemaUrl: file.schemaUrl,
+    });
+  }
+
+  private async applyExecutablePermissions(
+    files: FileContent[],
+    fileChanges: Map<string, FileWriteResult>,
+    modeCache: Map<string, "100755" | "100644" | null>,
+    ctx: FileWriteContext,
+    deps: FileWriterDeps
+  ): Promise<void> {
     for (const file of files) {
       const tracked = fileChanges.get(file.fileName);
       if (tracked?.action === "skip") {
         continue;
       }
 
-      if (shouldBeExecutable(file)) {
-        log.info(`Setting executable: ${file.fileName}`);
-        await gitOps.setExecutable(file.fileName);
+      const desired = shouldBeExecutable(file);
+      const currentMode = modeCache.get(file.fileName) ?? null;
+
+      if (desired && currentMode !== "100755") {
+        deps.log.info(
+          ctx.dryRun
+            ? `Would set executable: ${file.fileName}`
+            : `Setting executable: ${file.fileName}`
+        );
+        await deps.gitOps.setExecutable(file.fileName);
+      } else if (!desired && currentMode === "100755") {
+        deps.log.info(
+          ctx.dryRun
+            ? `Would clear executable: ${file.fileName}`
+            : `Clearing executable: ${file.fileName}`
+        );
+        await deps.gitOps.clearExecutable(file.fileName);
       }
     }
-
-    return { fileChanges, diffStats };
   }
 }

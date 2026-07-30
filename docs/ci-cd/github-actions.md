@@ -7,7 +7,7 @@ The simplest way to use xfg in GitHub Actions is with the official action:
 ```yaml
 - uses: actions/checkout@v4
 
-- uses: anthony-spruyt/xfg@v3
+- uses: anthony-spruyt/xfg@v5
   with:
     config: ./sync-config.yml
     github-token: ${{ secrets.GH_PAT }} # PAT with repo scope for cross-repo access
@@ -17,7 +17,6 @@ The simplest way to use xfg in GitHub Actions is with the official action:
 
 | Input                    | Required | Default               | Description                                                |
 | ------------------------ | -------- | --------------------- | ---------------------------------------------------------- |
-| `command`                | No       | `sync`                | Command to run (`sync` or `settings`)                      |
 | `config`                 | Yes      | -                     | Path to YAML config file                                   |
 | `dry-run`                | No       | `false`               | Preview mode - show what would change without creating PRs |
 | `work-dir`               | No       | `./tmp`               | Directory for cloning repositories                         |
@@ -27,7 +26,7 @@ The simplest way to use xfg in GitHub Actions is with the official action:
 | `merge-strategy`         | No       | -                     | Merge strategy (`merge`/`squash`/`rebase`)                 |
 | `delete-branch`          | No       | `false`               | Delete branch after merge                                  |
 | `github-token`           | No       | `${{ github.token }}` | GitHub token for authentication                            |
-| `github-app-id`          | No       | -                     | GitHub App ID for installation token generation            |
+| `github-client-id`       | No       | -                     | GitHub App Client ID for installation token generation     |
 | `github-app-private-key` | No       | -                     | GitHub App private key (PEM) for JWT signing               |
 | `azure-devops-token`     | No       | -                     | Azure DevOps Personal Access Token                         |
 | `gitlab-token`           | No       | -                     | GitLab token for authentication                            |
@@ -38,7 +37,7 @@ The simplest way to use xfg in GitHub Actions is with the official action:
 Sync configs across GitHub, Azure DevOps, and GitLab repositories:
 
 ```yaml
-- uses: anthony-spruyt/xfg@v3
+- uses: anthony-spruyt/xfg@v5
   with:
     config: ./sync-config.yml
     github-token: ${{ secrets.GH_PAT }}
@@ -54,7 +53,7 @@ Sync configs across GitHub, Azure DevOps, and GitLab repositories:
 Automatically merge PRs when CI passes:
 
 ```yaml
-- uses: anthony-spruyt/xfg@v3
+- uses: anthony-spruyt/xfg@v5
   with:
     config: ./sync-config.yml
     github-token: ${{ secrets.GH_PAT }}
@@ -66,21 +65,20 @@ Automatically merge PRs when CI passes:
 Push directly to the default branch without creating PRs:
 
 ```yaml
-- uses: anthony-spruyt/xfg@v3
+- uses: anthony-spruyt/xfg@v5
   with:
     config: ./sync-config.yml
     github-token: ${{ secrets.GH_PAT }}
     merge: direct
 ```
 
-### Settings Command Example
+### Settings-Only Example
 
-Apply branch protection rulesets to repositories:
+Apply branch protection rulesets and labels to repositories (no files section needed):
 
 ```yaml
-- uses: anthony-spruyt/xfg@v3
+- uses: anthony-spruyt/xfg@v5
   with:
-    command: settings
     config: ./settings-config.yml
     github-token: ${{ secrets.GH_PAT }}
 ```
@@ -98,10 +96,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: anthony-spruyt/xfg@v3
+      - uses: anthony-spruyt/xfg@v5
         with:
           config: ./sync-config.yml
-          github-app-id: ${{ vars.APP_ID }}
+          github-client-id: ${{ vars.CLIENT_ID }}
           github-app-private-key: ${{ secrets.APP_PRIVATE_KEY }}
 ```
 
@@ -132,7 +130,7 @@ See [GitHub App Authentication](../platforms/github-app.md) for full setup instr
 - Requires a Personal Access Token with `api` scope
 - Or a Project Access Token with `api` scope for single-project access
 
----
+______________________________________________________________________
 
 ## Workflow Example
 
@@ -158,11 +156,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
 ```
-
-## Token Requirements
-
-!!! warning "Personal Access Token Required"
-`GH_PAT` must be a Personal Access Token with `repo` scope to create PRs in target repositories. The default `GITHUB_TOKEN` only has access to the current repository.
 
 ## Creating a PAT
 

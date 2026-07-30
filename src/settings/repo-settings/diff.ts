@@ -1,7 +1,11 @@
 import type { GitHubRepoSettings } from "../../config/index.js";
+import type { SettingsAction } from "../base-processor.js";
 import type { CurrentRepoSettings } from "./types.js";
 
-export type RepoSettingsAction = "add" | "change" | "unchanged";
+export type RepoSettingsAction = Exclude<
+  SettingsAction,
+  "delete" | "unchanged"
+>;
 
 export interface RepoSettingsChange {
   property: keyof GitHubRepoSettings;
@@ -90,13 +94,13 @@ export function diffRepoSettings(
       // Property not currently set or unknown
       changes.push({
         property,
-        action: "add",
+        action: "create",
         newValue: desiredValue,
       });
     } else if (currentValue !== desiredValue) {
       changes.push({
         property,
-        action: "change",
+        action: "update",
         oldValue: currentValue,
         newValue: desiredValue,
       });
@@ -110,6 +114,6 @@ export function diffRepoSettings(
 /**
  * Checks if there are any changes to apply.
  */
-export function hasChanges(changes: RepoSettingsChange[]): boolean {
-  return changes.some((c) => c.action !== "unchanged");
+export function hasRepoSettingsChanges(changes: RepoSettingsChange[]): boolean {
+  return changes.length > 0;
 }

@@ -26,13 +26,12 @@ npm run dev      # Run CLI via ts-node
 **MUST pass before any PR:**
 
 1. `npm test` - Unit tests
-2. `./lint.sh` - Linting
-3. Integration tests (if CLI behavior changed):
+2. `npm run test:typecheck` - Test file type checking (catches broken imports/types in tests)
+3. `./lint.sh` - Linting
+4. Integration tests (for ALL behavioral changes that integration tests can cover):
    - `npm run test:integration:github`
    - `npm run test:integration:ado`
    - `npm run test:integration:gitlab`
-
-**Note:** CI integration tests only run on `main` branch, not on PR branches.
 
 ## Release
 
@@ -42,26 +41,40 @@ gh workflow run release.yaml -f version=patch  # or minor/major
 
 ## External Dependencies
 
-- Node.js >= 18
+- Node.js >= 20
 - `git`, `gh`, `az`, `glab` CLIs (platform-specific, must be authenticated)
+
+## Architecture Principles
+
+This codebase follows SOLID principles strictly. Do NOT violate these:
+
+- **Dependency Injection**: Never import singletons (e.g. `logger`) in shared utilities or library code. Accept dependencies via constructor or function parameters. Only CLI entry points and composition roots may import singletons directly.
+- **Interfaces for testability**: Every collaborator is injected via an interface. Single-impl interfaces are correct and intentional — do NOT inline them or couple to concrete classes.
+- **Composition over inheritance**: Use strategy pattern, delegation, and interface-based injection. Do NOT flatten abstractions or suggest inheritance.
+- **Interface Segregation**: Keep interfaces focused. A class needing only `{ debug(msg: string): void }` should accept that, not the full `ILogger`.
+- **No static coupling in libraries**: `src/shared/` and `src/sync/` modules must not import global singletons. Pass them in.
 
 ## Key Modules
 
-| Module                     | Purpose                                                                   |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `config-normalizer.ts`     | Parses config, expands git arrays, merges content, interpolates env vars  |
-| `repository-processor.ts`  | Orchestrates per-repo: clone, write files, commit, PR/push                |
-| `authenticated-git-ops.ts` | Wraps GitOps with per-command auth via `-c url.insteadOf`                 |
-| `xfg-template.ts`          | `${xfg:repo.name}` templating for repo-specific content                   |
-| `manifest.ts`              | Tracks managed files for orphan deletion (`deleteOrphaned`)               |
-| `github-summary.ts`        | Writes job summary to `GITHUB_STEP_SUMMARY` in CI                         |
-| `config-validator.ts`      | Validates raw config; `validateForSync`/`validateForSettings` per-command |
+| Module                                    | Purpose                                                                  |
+| ----------------------------------------- | ------------------------------------------------------------------------ |
+| `src/config/normalizer.ts`                | Parses config, expands git arrays, merges content, interpolates env vars |
+| `src/config/validator.ts`                 | Validates raw config via `validateForSync` (files, settings, or both)    |
+| `src/sync/repository-processor.ts`        | Composition root: wires SyncWorkflow and all per-repo collaborators      |
+| `src/sync/sync-workflow.ts`               | Orchestrates per-repo: clone, write files, commit, PR/push               |
+| `src/settings/base-processor.ts`          | Shared guards (`withGitHubGuards`), result builders, ISettingsProcessor  |
+| `src/settings/rulesets/processor.ts`      | Ruleset sync: diff remote vs config, create/update/delete via GitHub API |
+| `src/lifecycle/repo-lifecycle-manager.ts` | Repo creation, deletion, mirror push, and lifecycle orchestration        |
+| `src/vcs/authenticated-git-ops.ts`        | Wraps GitOps with per-command auth via `-c url.insteadOf`                |
+| `src/shared/xfg-template.ts`              | `${xfg:repo.name}` templating for repo-specific content                  |
+| `src/sync/manifest.ts`                    | Tracks managed files for orphan deletion (`deleteOrphaned`)              |
+| `src/output/github-summary.ts`            | Writes job summary to `GITHUB_STEP_SUMMARY` in CI                        |
 
 ## GitHub Rulesets API
 
 - `conditions.ref_name` requires both `include` and `exclude` arrays (even if empty)
 - `pull_request` rules require ALL parameters - provide defaults for missing ones
-- Test locally with: `node dist/index.js settings --config <config.yaml>`
+- Test locally with: `node dist/index.js sync --config <config.yaml>`
 
 ## Linting Gotchas
 
@@ -73,13 +86,16 @@ gh workflow run release.yaml -f version=patch  # or minor/major
 
 - **Always create fresh branch from main** before starting work - old branches may already be merged
 - **After PR merged, checkout main and pull** before any new work - don't reuse old branches
-- **Enable automerge after PR creation:** `gh pr merge <num> --auto --squash --delete-branch`
 - **Wait for CI before claiming done** - verify checks pass, don't just run local lint
-- **Check CI on main after PR merge** - integration tests only run on main; verify they pass before releasing
-- **Do not commit plans to `docs/`** - that's GitHub Pages; use `plans/` for plans
+- **Check CI on main after PR merge** - verify integration tests pass before releasing
+- **Do not commit plans or specs to `docs/`** - that's GitHub Pages; use `plans/` for plans and `plans/superpowers/` for superpowers specs/plans (the plugin defaults to `docs/superpowers/` which triggers docs deploy)
 - **Do not commit plans to main branch** - create a new branch
 - Output format determined by file extension: `.json`/`.json5`/`.yaml`/`.yml` → object content; others → string/string[]
 - Escape `${VAR}` as `$${VAR}` to output literal (for devcontainer.json, shell scripts)
 - Escape `${xfg:var}` as `$${xfg:var}` similarly
 - `.sh` files auto-marked executable unless `executable: false`
 - PR branch default: `chore/sync-config` (reuses existing branch/PR if found)
+
+## Desloppify
+
+See `.claude/rules/desloppify.md` for all desloppify rules (scanning, false positives, reviews, subagent limits).

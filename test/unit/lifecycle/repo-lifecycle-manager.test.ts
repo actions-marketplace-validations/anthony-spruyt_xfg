@@ -8,9 +8,15 @@ import type {
   IRepoLifecycleFactory,
   IRepoLifecycleProvider,
   IMigrationSource,
+  LifecycleCreateParams,
+  LifecycleForkParams,
+  LifecycleReceiveMigrationParams,
 } from "../../../src/lifecycle/types.js";
 import type { RepoConfig } from "../../../src/config/types.js";
-import type { GitHubRepoInfo } from "../../../src/shared/repo-detector.js";
+import type { GitHubRepoInfo } from "../../../src/repo/index.js";
+import type { ICommandExecutor } from "../../../src/shared/command-executor.js";
+
+const stubExecutor: ICommandExecutor = { exec: async () => "" };
 
 describe("RepoLifecycleManager", () => {
   const testDir = join(tmpdir(), `lifecycle-manager-test-${Date.now()}`);
@@ -39,6 +45,10 @@ describe("RepoLifecycleManager", () => {
     forkCalled?: () => void;
     migrateCalled?: () => void;
     cloneCalled?: () => void;
+    onCreate?: (params: LifecycleCreateParams) => void;
+    onFork?: (params: LifecycleForkParams) => void;
+    onReceiveMigration?: (params: LifecycleReceiveMigrationParams) => void;
+    onClone?: (repoInfo: unknown, cloneDir: string) => void;
   }): IRepoLifecycleFactory {
     // Track whether a lifecycle operation has been performed so
     // waitForRepoReady() sees the repo as ready immediately.
@@ -49,26 +59,30 @@ describe("RepoLifecycleManager", () => {
       async exists() {
         return repoCreated || (options.exists ?? false);
       },
-      async create() {
+      async create(params) {
         options.createCalled?.();
+        options.onCreate?.(params);
         repoCreated = true;
       },
-      async fork() {
+      async fork(params) {
         options.forkCalled?.();
+        options.onFork?.(params);
         repoCreated = true;
       },
-      async receiveMigration() {
+      async receiveMigration(params) {
         options.migrateCalled?.();
+        options.onReceiveMigration?.(params);
         repoCreated = true;
       },
     };
 
     const source: IMigrationSource = {
       platform: "azure-devops",
-      async cloneForMigration(_repoInfo, cloneDir) {
+      async cloneForMigration(repoInfo, cloneDir) {
         // Create the directory to simulate clone
         mkdirSync(cloneDir, { recursive: true });
         options.cloneCalled?.();
+        options.onClone?.(repoInfo, cloneDir);
       },
     };
 
@@ -81,7 +95,12 @@ describe("RepoLifecycleManager", () => {
   describe("ensureRepo()", () => {
     test("returns existed when repo exists", async () => {
       const factory = createMockFactory({ exists: true });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -97,14 +116,19 @@ describe("RepoLifecycleManager", () => {
     });
 
     test("creates repo when missing and no upstream/source", async () => {
-      let createCalled = false;
+      let capturedParams: LifecycleCreateParams | undefined;
       const factory = createMockFactory({
         exists: false,
-        createCalled: () => {
-          createCalled = true;
+        onCreate: (params) => {
+          capturedParams = params;
         },
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -117,18 +141,26 @@ describe("RepoLifecycleManager", () => {
       });
 
       assert.equal(result.action, "created");
-      assert.equal(createCalled, true);
+      assert.ok(capturedParams, "create should have been called");
+      assert.equal(capturedParams.repo.owner, "test-org");
+      assert.equal(capturedParams.repo.repo, "test-repo");
+      assert.equal(capturedParams.settings, undefined);
     });
 
     test("forks when upstream present and missing", async () => {
-      let forkCalled = false;
+      let capturedParams: LifecycleForkParams | undefined;
       const factory = createMockFactory({
         exists: false,
-        forkCalled: () => {
-          forkCalled = true;
+        onFork: (params) => {
+          capturedParams = params;
         },
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -142,22 +174,31 @@ describe("RepoLifecycleManager", () => {
       });
 
       assert.equal(result.action, "forked");
-      assert.equal(forkCalled, true);
+      assert.ok(capturedParams, "fork should have been called");
+      assert.equal(capturedParams.upstream.owner, "opensource");
+      assert.equal(capturedParams.upstream.repo, "tool");
+      assert.equal(capturedParams.target.owner, "test-org");
+      assert.equal(capturedParams.target.repo, "test-repo");
     });
 
     test("migrates when source present and missing", async () => {
-      let migrateCalled = false;
-      let cloneCalled = false;
+      let capturedMigrateParams: LifecycleReceiveMigrationParams | undefined;
+      let capturedCloneDir: string | undefined;
       const factory = createMockFactory({
         exists: false,
-        migrateCalled: () => {
-          migrateCalled = true;
+        onReceiveMigration: (params) => {
+          capturedMigrateParams = params;
         },
-        cloneCalled: () => {
-          cloneCalled = true;
+        onClone: (_repoInfo, cloneDir) => {
+          capturedCloneDir = cloneDir;
         },
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -171,15 +212,30 @@ describe("RepoLifecycleManager", () => {
       });
 
       assert.equal(result.action, "migrated");
-      assert.equal(cloneCalled, true);
-      assert.equal(migrateCalled, true);
+      assert.ok(capturedCloneDir, "cloneForMigration should have been called");
+      assert.ok(
+        capturedCloneDir.includes("migration-source"),
+        "clone dir should be the migration-source subdirectory"
+      );
+      assert.ok(
+        capturedMigrateParams,
+        "receiveMigration should have been called"
+      );
+      assert.equal(capturedMigrateParams.repo.owner, "test-org");
+      assert.equal(capturedMigrateParams.repo.repo, "test-repo");
+      assert.equal(capturedMigrateParams.sourceDir, capturedCloneDir);
     });
 
     test("cleans up migration source directory after success", async () => {
       const factory = createMockFactory({
         exists: false,
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -205,7 +261,12 @@ describe("RepoLifecycleManager", () => {
           createCalled = true;
         },
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -230,7 +291,12 @@ describe("RepoLifecycleManager", () => {
           forkCalled = true;
         },
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -249,7 +315,12 @@ describe("RepoLifecycleManager", () => {
 
     test("dry-run fork returns skipped", async () => {
       const factory = createMockFactory({ exists: false });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -268,7 +339,12 @@ describe("RepoLifecycleManager", () => {
 
     test("dry-run migrate returns skipped", async () => {
       const factory = createMockFactory({ exists: false });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -286,14 +362,19 @@ describe("RepoLifecycleManager", () => {
     });
 
     test("passes settings to create", async () => {
-      let createCalled = false;
+      let capturedParams: LifecycleCreateParams | undefined;
       const factory = createMockFactory({
         exists: false,
-        createCalled: () => {
-          createCalled = true;
+        onCreate: (params) => {
+          capturedParams = params;
         },
       });
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -307,7 +388,10 @@ describe("RepoLifecycleManager", () => {
         { visibility: "private" }
       );
 
-      assert.equal(createCalled, true);
+      assert.ok(capturedParams, "create should have been called");
+      assert.equal(capturedParams.repo.owner, "test-org");
+      assert.equal(capturedParams.repo.repo, "test-repo");
+      assert.deepEqual(capturedParams.settings, { visibility: "private" });
     });
 
     test("throws when platform does not support forking", async () => {
@@ -329,7 +413,12 @@ describe("RepoLifecycleManager", () => {
         }),
       };
 
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -372,7 +461,12 @@ describe("RepoLifecycleManager", () => {
         getMigrationSource: () => source,
       };
 
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -403,7 +497,12 @@ describe("RepoLifecycleManager", () => {
           throw new Error("Platform not supported");
         },
       };
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: "https://dev.azure.com/org/project/_git/repo",
@@ -445,7 +544,12 @@ describe("RepoLifecycleManager", () => {
           );
         },
       };
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: mockGitHubRepoInfo.gitUrl,
@@ -472,7 +576,12 @@ describe("RepoLifecycleManager", () => {
           throw new Error("Platform not supported");
         },
       };
-      const manager = new RepoLifecycleManager(factory);
+      const manager = new RepoLifecycleManager(
+        factory,
+        stubExecutor,
+        undefined,
+        "/test"
+      );
 
       const repoConfig: RepoConfig = {
         git: "https://dev.azure.com/org/project/_git/repo",

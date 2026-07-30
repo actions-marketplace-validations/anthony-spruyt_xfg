@@ -1,6 +1,15 @@
-// src/output/sync-report.ts
-import { appendFileSync } from "node:fs";
 import chalk from "chalk";
+import { writeGitHubStepSummary } from "./github-summary.js";
+import { formatCountEntry } from "./settings-report.js";
+import { formatDiffLine } from "../shared/diff-format.js";
+import type { MergeMode } from "../config/index.js";
+import type { ActiveAction } from "../settings/index.js";
+
+export interface ReportFileChange {
+  path: string;
+  action: ActiveAction;
+  diffLines?: string[];
+}
 
 export interface SyncReport {
   repos: RepoFileChanges[];
@@ -11,31 +20,19 @@ export interface SyncReport {
 
 export interface RepoFileChanges {
   repoName: string;
-  files: FileChange[];
+  files: ReportFileChange[];
   prUrl?: string;
-  mergeOutcome?: "manual" | "auto" | "force" | "direct";
+  mergeOutcome?: MergeMode;
   error?: string;
 }
 
-export interface FileChange {
-  path: string;
-  action: "create" | "update" | "delete";
-}
-
-function formatSummary(totals: SyncReport["totals"]): string {
-  const total = totals.files.create + totals.files.update + totals.files.delete;
-
-  if (total === 0) {
-    return "No changes";
-  }
-
-  const parts: string[] = [];
-  if (totals.files.create > 0) parts.push(`${totals.files.create} to create`);
-  if (totals.files.update > 0) parts.push(`${totals.files.update} to update`);
-  if (totals.files.delete > 0) parts.push(`${totals.files.delete} to delete`);
-
-  const fileWord = total === 1 ? "file" : "files";
-  return `Plan: ${total} ${fileWord} (${parts.join(", ")})`;
+function formatSyncSummary(totals: SyncReport["totals"]): string {
+  const entry = formatCountEntry("file", "files", [
+    { label: "to create", value: totals.files.create },
+    { label: "to update", value: totals.files.update },
+    { label: "to delete", value: totals.files.delete },
+  ]);
+  return entry ? `Plan: ${entry}` : "No changes";
 }
 
 export function formatSyncReportCLI(report: SyncReport): string[] {
@@ -58,6 +55,13 @@ export function formatSyncReportCLI(report: SyncReport): string[] {
       } else if (file.action === "delete") {
         lines.push(chalk.red(`    - ${file.path}`));
       }
+
+      // Content diff for structured data files
+      if (file.diffLines) {
+        for (const diffLine of file.diffLines) {
+          lines.push(`      ${formatDiffLine(diffLine)}`);
+        }
+      }
     }
 
     // Error
@@ -69,7 +73,7 @@ export function formatSyncReportCLI(report: SyncReport): string[] {
   }
 
   // Summary
-  lines.push(formatSummary(report.totals));
+  lines.push(formatSyncSummary(report.totals));
 
   return lines;
 }
@@ -92,51 +96,64 @@ export function formatSyncReportMarkdown(
     lines.push("");
   }
 
-  // Diff block
-  const diffLines: string[] = [];
-
+  // Per-repo sections: heading + diff block
   for (const repo of report.repos) {
     if (repo.files.length === 0 && !repo.error) {
       continue;
     }
 
-    diffLines.push(`@@ ${repo.repoName} @@`);
-
-    for (const file of repo.files) {
-      if (file.action === "create") {
-        diffLines.push(`+ ${file.path}`);
-      } else if (file.action === "update") {
-        diffLines.push(`! ${file.path}`);
-      } else if (file.action === "delete") {
-        diffLines.push(`- ${file.path}`);
-      }
-    }
-
-    if (repo.error) {
-      diffLines.push(`- Error: ${repo.error}`);
-    }
-  }
-
-  if (diffLines.length > 0) {
-    lines.push("```diff");
-    lines.push(...diffLines);
-    lines.push("```");
+    lines.push(`### ${repo.repoName}`);
     lines.push("");
+
+    const diffLines = renderSyncLines(repo);
+
+    if (diffLines.length > 0) {
+      lines.push("```diff");
+      lines.push(...diffLines);
+      lines.push("```");
+      lines.push("");
+    }
   }
 
   // Summary
-  lines.push(`**${formatSummary(report.totals)}**`);
+  lines.push(`**${formatSyncSummary(report.totals)}**`);
 
   return lines.join("\n");
 }
 
+export function renderSyncLines(syncRepo: RepoFileChanges): string[] {
+  const lines: string[] = [];
+
+  for (let i = 0; i < syncRepo.files.length; i++) {
+    const file = syncRepo.files[i];
+
+    if (i > 0) lines.push("");
+
+    if (file.action === "create") {
+      lines.push(`+ ${file.path}`);
+    } else if (file.action === "update") {
+      lines.push(`! ${file.path}`);
+    } else if (file.action === "delete") {
+      lines.push(`- ${file.path}`);
+    }
+
+    if (file.diffLines) {
+      lines.push(...file.diffLines);
+    }
+  }
+
+  if (syncRepo.error) {
+    lines.push(`- Error: ${syncRepo.error}`);
+  }
+
+  return lines;
+}
+
 export function writeSyncReportSummary(
   report: SyncReport,
-  dryRun: boolean
+  dryRun: boolean,
+  summaryPath: string | undefined
 ): void {
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (!summaryPath) return;
-
   const markdown = formatSyncReportMarkdown(report, dryRun);
-  appendFileSync(summaryPath, "\n" + markdown + "\n");
+  writeGitHubStepSummary(markdown, summaryPath);
 }

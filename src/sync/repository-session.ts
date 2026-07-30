@@ -1,5 +1,6 @@
-import { RepoInfo } from "../shared/repo-detector.js";
-import { ILogger } from "../shared/logger.js";
+import type { RepoInfo } from "../repo/index.js";
+import type { ILogger } from "../shared/logger.js";
+import { safeCleanup } from "../shared/cleanup-utils.js";
 import type {
   GitOpsFactory,
   SessionOptions,
@@ -19,37 +20,34 @@ export class RepositorySession implements IRepositorySession {
   ): Promise<SessionContext> {
     const { workDir, dryRun, retries, authOptions } = options;
 
-    // Create gitOps instance
+    const { executor } = options;
     const gitOps = this.gitOpsFactory(
-      { workDir, dryRun, retries },
-      authOptions
+      { workDir, dryRun, executor },
+      authOptions,
+      retries
     );
 
-    // Clean workspace
-    this.log.info("Cleaning workspace...");
+    this.log.debug("Cleaning workspace...");
     gitOps.cleanWorkspace();
 
-    // Clone repository
-    this.log.info("Cloning repository...");
+    this.log.debug("Cloning repository...");
     await gitOps.clone(repoInfo.gitUrl);
 
-    // Detect default branch
     const { branch: baseBranch, method: detectionMethod } =
       await gitOps.getDefaultBranch();
     this.log.info(
       `Default branch: ${baseBranch} (detected via ${detectionMethod})`
     );
 
-    // Return context with cleanup function
     return {
       gitOps,
       baseBranch,
       cleanup: () => {
-        try {
-          gitOps.cleanWorkspace();
-        } catch {
-          // Ignore cleanup errors - best effort
-        }
+        safeCleanup(
+          () => gitOps.cleanWorkspace(),
+          "workspace removal failed",
+          this.log
+        );
       },
     };
   }

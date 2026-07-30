@@ -1,18 +1,12 @@
-import { Document, stringify } from "yaml";
+import { Document, isScalar, Scalar, stringify, visit } from "yaml";
 
-export type OutputFormat = "json" | "json5" | "yaml";
+type OutputFormat = "json" | "json5" | "yaml";
 
-/**
- * Options for content conversion.
- */
-export interface ConvertOptions {
+interface ConvertOptions {
   header?: string[];
   schemaUrl?: string;
 }
 
-/**
- * Detects output format from file extension.
- */
 export function detectOutputFormat(fileName: string): OutputFormat {
   const ext = fileName.toLowerCase().split(".").pop();
   if (ext === "yaml" || ext === "yml") {
@@ -35,12 +29,10 @@ function buildHeaderComment(
 ): string | undefined {
   const lines: string[] = [];
 
-  // Add yaml-language-server schema directive first (if present)
   if (schemaUrl) {
     lines.push(` yaml-language-server: $schema=${schemaUrl}`);
   }
 
-  // Add custom header lines (with space prefix for proper formatting)
   if (header && header.length > 0) {
     lines.push(...header.map((h) => ` ${h}`));
   }
@@ -60,12 +52,10 @@ function buildCommentOnlyYaml(
 ): string | undefined {
   const lines: string[] = [];
 
-  // Add yaml-language-server schema directive first (if present)
   if (schemaUrl) {
     lines.push(`# yaml-language-server: $schema=${schemaUrl}`);
   }
 
-  // Add custom header lines
   if (header && header.length > 0) {
     lines.push(...header.map((h) => `# ${h}`));
   }
@@ -73,6 +63,11 @@ function buildCommentOnlyYaml(
   if (lines.length === 0) return undefined;
 
   return lines.join("\n") + "\n";
+}
+
+function buildJson5HeaderComment(header?: string[]): string | undefined {
+  if (!header || header.length === 0) return undefined;
+  return header.map((h) => `// ${h}`).join("\n") + "\n";
 }
 
 /**
@@ -84,7 +79,6 @@ export function convertContentToString(
   fileName: string,
   options?: ConvertOptions
 ): string {
-  // Handle empty file case
   if (content === null) {
     const format = detectOutputFormat(fileName);
     if (format === "yaml" && options) {
@@ -96,23 +90,24 @@ export function convertContentToString(
         return commentOnly;
       }
     }
+    if (format === "json5" && options) {
+      const commentOnly = buildJson5HeaderComment(options.header);
+      if (commentOnly) {
+        return commentOnly;
+      }
+    }
     return "";
   }
 
-  // Handle string content (text file)
   if (typeof content === "string") {
-    // Ensure trailing newline for text files
     return content.endsWith("\n") ? content : content + "\n";
   }
 
-  // Handle string[] content (text file with lines)
   if (Array.isArray(content)) {
-    // Join lines with newlines and ensure trailing newline
     const text = content.join("\n");
     return text.length > 0 ? text + "\n" : "";
   }
 
-  // Handle object content (JSON/YAML)
   const format = detectOutputFormat(fileName);
 
   if (format === "yaml") {
@@ -130,23 +125,36 @@ export function convertContentToString(
       }
     }
 
-    // Quote all string values for YAML 1.1 compatibility.
-    // The yaml library outputs YAML 1.2 where "06:00" is a plain string,
-    // but many tools (e.g., Dependabot) use YAML 1.1 parsers that interpret
-    // unquoted values like "06:00" as sexagesimal (360) or "yes"/"no" as booleans.
+    // Use BLOCK_LITERAL (|) for multi-line string values to preserve readability.
+    // Single-line strings remain QUOTE_DOUBLE via defaultStringType for YAML 1.1
+    // compatibility (prevents "06:00" as sexagesimal, "yes"/"no" as booleans).
+    visit(doc, {
+      Scalar(key, node) {
+        if (
+          key === "value" &&
+          isScalar(node) &&
+          typeof node.value === "string" &&
+          node.value.includes("\n")
+        ) {
+          node.type = Scalar.BLOCK_LITERAL;
+        }
+      },
+    });
+
     return stringify(doc, {
       indent: 2,
       defaultStringType: "QUOTE_DOUBLE",
       defaultKeyType: "PLAIN",
+      lineWidth: 0,
     });
   }
 
-  if (format === "json5") {
-    // JSON5 format - output standard JSON (which is valid JSON5)
-    // Using JSON.stringify for standard JSON output that's compatible everywhere
-    return JSON.stringify(content, null, 2) + "\n";
+  if (format === "json5" && options) {
+    const headerComment = buildJson5HeaderComment(options.header);
+    if (headerComment) {
+      return headerComment + JSON.stringify(content, null, 2) + "\n";
+    }
   }
 
-  // JSON format - comments not supported, ignore header/schemaUrl
   return JSON.stringify(content, null, 2) + "\n";
 }

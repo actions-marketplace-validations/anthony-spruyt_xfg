@@ -37,7 +37,7 @@ repos:
 
 Run `xfg` whenever standards change—PRs are created automatically for review.
 
----
+______________________________________________________________________
 
 ## CI/CD Workflow Standardization
 
@@ -78,7 +78,7 @@ repos:
       - git@github.com:your-org/shared-libs.git
 ```
 
----
+______________________________________________________________________
 
 ## Security & Compliance Governance
 
@@ -114,13 +114,13 @@ repos:
 
 Use [file references](configuration/file-references.md) to load complex templates from external files.
 
----
+______________________________________________________________________
 
 ## Branch Protection at Scale
 
 **Problem:** You need consistent branch protection rules across all repositories. Managing rulesets manually through the GitHub UI doesn't scale, and there's no audit trail for changes.
 
-**Solution:** Define GitHub Rulesets declaratively and apply them with `xfg settings`:
+**Solution:** Define GitHub Rulesets declaratively and apply them with `xfg sync`:
 
 ```yaml
 settings:
@@ -169,7 +169,7 @@ repos:
       - git@github.com:your-org/service-critical.git
 ```
 
-Run `xfg settings --config ./config.yaml` to apply rules to all repos. Stricter requirements for specific repos? Override per-repo:
+Run `xfg sync --config ./config.yaml` to apply rules to all repos. Stricter requirements for specific repos? Override per-repo:
 
 ```yaml
 repos:
@@ -183,13 +183,13 @@ repos:
                 requiredApprovingReviewCount: 3 # Override default
 ```
 
----
+______________________________________________________________________
 
 ## Repository Settings at Scale
 
 **Problem:** Your GitHub repositories have inconsistent merge strategies, security settings, and feature toggles. Some repos allow merge commits while others only allow squash. Dependabot alerts are enabled on some but not others. Managing this through the GitHub UI doesn't scale.
 
-**Solution:** Define repository settings declaratively and apply them with `xfg settings`:
+**Solution:** Define repository settings declaratively and apply them with `xfg sync`:
 
 ```yaml
 settings:
@@ -221,7 +221,7 @@ repos:
 Preview changes with dry-run:
 
 ```bash
-xfg settings -c config.yaml --dry-run
+xfg sync -c config.yaml --dry-run
 ```
 
 Output shows exactly what will change:
@@ -259,7 +259,7 @@ repos:
         hasWiki: true
 ```
 
----
+______________________________________________________________________
 
 ## Developer Experience Consistency
 
@@ -305,7 +305,7 @@ repos:
 
 New team members get the same experience in every repo from day one.
 
----
+______________________________________________________________________
 
 ## Open Source Project Maintainers
 
@@ -337,7 +337,7 @@ repos:
       - git@github.com:your-name/project-plugins.git
 ```
 
----
+______________________________________________________________________
 
 ## Configuration Drift Prevention
 
@@ -369,7 +369,7 @@ jobs:
 
 Drift is detected weekly, and PRs are created to bring repos back into compliance.
 
----
+______________________________________________________________________
 
 ## Migrating to New Standards
 
@@ -401,7 +401,7 @@ repos:
       - git@github.com:your-org/repo-2.git
 ```
 
----
+______________________________________________________________________
 
 ## Hybrid Teams (Multi-Platform)
 
@@ -427,7 +427,7 @@ repos:
   - git: git@gitlab.example.com:your-org/internal-tool.git
 ```
 
----
+______________________________________________________________________
 
 ## Why xfg vs. Alternatives
 

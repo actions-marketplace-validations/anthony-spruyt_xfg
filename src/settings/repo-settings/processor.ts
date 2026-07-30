@@ -1,58 +1,45 @@
 import type { RepoConfig, GitHubRepoSettings } from "../../config/index.js";
-import type { RepoInfo, GitHubRepoInfo } from "../../shared/repo-detector.js";
+import type { GitHubRepoInfo, RepoInfo } from "../../repo/index.js";
+import type { IRepoSettingsStrategy } from "./types.js";
+import type { IRepoMetadataProvider, RepoMetadata } from "../../repo/index.js";
+import { diffRepoSettings, hasRepoSettingsChanges } from "./diff.js";
 import {
-  isGitHubRepo,
-  getRepoDisplayName,
-} from "../../shared/repo-detector.js";
-import { GitHubRepoSettingsStrategy } from "./github-repo-settings-strategy.js";
-import type { IRepoSettingsStrategy, CurrentRepoSettings } from "./types.js";
-import { diffRepoSettings, hasChanges } from "./diff.js";
-import { formatRepoSettingsPlan, RepoSettingsPlanResult } from "./formatter.js";
-import { hasGitHubAppCredentials } from "../../vcs/index.js";
-import { GitHubAppTokenManager } from "../../vcs/github-app-token-manager.js";
+  formatRepoSettingsPlan,
+  type RepoSettingsPlanResult,
+} from "./formatter.js";
+import {
+  withGitHubGuards,
+  type BaseProcessorOptions,
+  type BaseProcessorResult,
+  type ISettingsProcessor,
+  type ChangeCounts,
+  buildDryRunResult,
+  buildApplyResult,
+} from "../base-processor.js";
 
-export interface IRepoSettingsProcessor {
-  process(
-    repoConfig: RepoConfig,
-    repoInfo: RepoInfo,
-    options: RepoSettingsProcessorOptions
-  ): Promise<RepoSettingsProcessorResult>;
-}
+export type IRepoSettingsProcessor = ISettingsProcessor<
+  RepoSettingsProcessorOptions,
+  RepoSettingsProcessorResult
+>;
 
-export interface RepoSettingsProcessorOptions {
-  dryRun?: boolean;
-  token?: string;
-}
+export type RepoSettingsProcessorOptions = BaseProcessorOptions;
 
-export interface RepoSettingsProcessorResult {
-  success: boolean;
-  repoName: string;
-  message: string;
-  skipped?: boolean;
-  dryRun?: boolean;
-  changes?: {
-    adds: number;
-    changes: number;
-  };
+export interface RepoSettingsProcessorResult extends BaseProcessorResult {
+  changes?: ChangeCounts;
   warnings?: string[];
   planOutput?: RepoSettingsPlanResult;
 }
 
 export class RepoSettingsProcessor implements IRepoSettingsProcessor {
   private readonly strategy: IRepoSettingsStrategy;
-  private readonly tokenManager: GitHubAppTokenManager | null;
+  private readonly metadataProvider: IRepoMetadataProvider;
 
-  constructor(strategy?: IRepoSettingsStrategy) {
-    this.strategy = strategy ?? new GitHubRepoSettingsStrategy();
-
-    if (hasGitHubAppCredentials()) {
-      this.tokenManager = new GitHubAppTokenManager(
-        process.env.XFG_GITHUB_APP_ID!,
-        process.env.XFG_GITHUB_APP_PRIVATE_KEY!
-      );
-    } else {
-      this.tokenManager = null;
-    }
+  constructor(
+    strategy: IRepoSettingsStrategy,
+    metadataProvider: IRepoMetadataProvider
+  ) {
+    this.strategy = strategy;
+    this.metadataProvider = metadataProvider;
   }
 
   async process(
@@ -60,114 +47,117 @@ export class RepoSettingsProcessor implements IRepoSettingsProcessor {
     repoInfo: RepoInfo,
     options: RepoSettingsProcessorOptions
   ): Promise<RepoSettingsProcessorResult> {
-    const repoName = getRepoDisplayName(repoInfo);
-    const { dryRun, token } = options;
+    return withGitHubGuards(repoConfig, repoInfo, options, {
+      hasDesiredSettings: (rc) => {
+        const repoSettings = rc.settings?.repo;
+        return !!repoSettings && Object.keys(repoSettings).length > 0;
+      },
+      emptySettingsMessage: "No repo settings configured",
+      applySettings: (githubRepo, rc, opts, token, repoName) =>
+        this.applySettings(githubRepo, rc, opts, token, repoName),
+    });
+  }
 
-    // Check if this is a GitHub repo
-    if (!isGitHubRepo(repoInfo)) {
-      return {
-        success: true,
-        repoName,
-        message: `Skipped: ${repoName} is not a GitHub repository`,
-        skipped: true,
-      };
-    }
-
-    const githubRepo = repoInfo as GitHubRepoInfo;
+  private async applySettings(
+    githubRepo: GitHubRepoInfo,
+    repoConfig: RepoConfig,
+    options: RepoSettingsProcessorOptions,
+    effectiveToken: string | undefined,
+    repoName: string
+  ): Promise<RepoSettingsProcessorResult> {
+    const { dryRun } = options;
     const desiredSettings = repoConfig.settings?.repo;
-
-    // If no repo settings configured, skip
-    if (!desiredSettings || Object.keys(desiredSettings).length === 0) {
-      return {
-        success: true,
-        repoName,
-        message: "No repo settings configured",
-        skipped: true,
-      };
+    if (!desiredSettings || typeof desiredSettings !== "object") {
+      throw new Error("applySettings called without repo settings");
     }
 
-    try {
-      // Resolve App token if available, fall back to provided token
-      const effectiveToken =
-        token ?? (await this.getInstallationToken(githubRepo));
-      const strategyOptions = { token: effectiveToken, host: githubRepo.host };
+    const strategyOptions = { token: effectiveToken, host: githubRepo.host };
 
-      // Fetch current settings
-      const currentSettings = await this.strategy.getSettings(
-        githubRepo,
-        strategyOptions
-      );
+    // Fetch current settings and metadata in parallel
+    const [currentSettings, metadata] = await Promise.all([
+      this.strategy.get(githubRepo, strategyOptions),
+      this.metadataProvider.getMetadata(githubRepo, strategyOptions),
+    ]);
 
-      // Validate security settings compatibility
-      const securityErrors = this.validateSecuritySettings(
-        desiredSettings,
-        currentSettings
-      );
-      if (securityErrors.length > 0) {
-        return {
-          success: false,
-          repoName,
-          message: `Failed: ${securityErrors.join("; ")}`,
-        };
-      }
-
-      // Compute diff
-      const changes = diffRepoSettings(currentSettings, desiredSettings);
-
-      if (!hasChanges(changes)) {
-        return {
-          success: true,
-          repoName,
-          message: "No changes needed",
-          changes: { adds: 0, changes: 0 },
-        };
-      }
-
-      // Format plan output
-      const planOutput = formatRepoSettingsPlan(changes);
-
-      // Dry run mode - report planned changes without applying
-      if (dryRun) {
-        return {
-          success: true,
-          repoName,
-          message: `[DRY RUN] ${planOutput.adds} to add, ${planOutput.changes} to change`,
-          dryRun: true,
-          changes: { adds: planOutput.adds, changes: planOutput.changes },
-          warnings: planOutput.warnings,
-          planOutput,
-        };
-      }
-
-      // Apply changes - only send settings that actually changed
-      const changedSettings = changes.reduce(
-        (acc, change) => {
-          if (change.action !== "unchanged") {
-            acc[change.property] = change.newValue;
-          }
-          return acc;
-        },
-        {} as Record<string, unknown>
-      ) as GitHubRepoSettings;
-
-      await this.applyChanges(githubRepo, changedSettings, strategyOptions);
-
-      return {
-        success: true,
-        repoName,
-        message: `Applied: ${planOutput.adds} added, ${planOutput.changes} changed`,
-        changes: { adds: planOutput.adds, changes: planOutput.changes },
-        warnings: planOutput.warnings,
-        planOutput,
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    // Validate security settings compatibility
+    const securityErrors = this.validateSecuritySettings(
+      desiredSettings,
+      metadata
+    );
+    if (securityErrors.length > 0) {
       return {
         success: false,
         repoName,
-        message: `Failed: ${message}`,
+        message: `Failed: ${securityErrors.join("; ")}`,
       };
     }
+
+    // Compute diff
+    const changes = diffRepoSettings(currentSettings, desiredSettings);
+
+    if (!hasRepoSettingsChanges(changes)) {
+      return {
+        success: true,
+        repoName,
+        message: "No changes needed",
+        changes: { create: 0, update: 0, delete: 0, unchanged: 0 },
+      };
+    }
+
+    // Validate defaultBranch target exists before attempting to apply
+    const defaultBranchChange = changes.find(
+      (c) => c.property === "defaultBranch"
+    );
+    if (defaultBranchChange) {
+      const targetBranch = String(defaultBranchChange.newValue);
+      const exists = await this.strategy.branchExists(
+        githubRepo,
+        targetBranch,
+        strategyOptions
+      );
+      if (!exists) {
+        const currentBranch = defaultBranchChange.oldValue
+          ? String(defaultBranchChange.oldValue)
+          : "unknown";
+        return {
+          success: false,
+          repoName,
+          message: `Failed: Cannot set default branch to '${targetBranch}': branch '${targetBranch}' does not exist (current: '${currentBranch}'). Create or rename the branch first.`,
+        };
+      }
+    }
+
+    // Format plan output
+    const planOutput = formatRepoSettingsPlan(changes);
+
+    const changeCounts = {
+      create: planOutput.creates,
+      update: planOutput.updates,
+      delete: 0,
+      unchanged: 0,
+    };
+
+    if (dryRun) {
+      return buildDryRunResult(repoName, changeCounts, {
+        warnings: planOutput.warnings,
+        planOutput,
+      });
+    }
+
+    // Apply changes - only send settings that actually changed
+    const changedSettings: Partial<GitHubRepoSettings> = {};
+    for (const change of changes) {
+      (changedSettings as Record<string, unknown>)[change.property] =
+        change.newValue;
+    }
+
+    await this.applyChanges(githubRepo, changedSettings, strategyOptions);
+
+    const appliedCount = Object.keys(changedSettings).length;
+    return buildApplyResult(repoName, changeCounts, appliedCount, {
+      warnings: planOutput.warnings,
+      planOutput,
+    });
   }
 
   private async applyChanges(
@@ -185,13 +175,13 @@ export class RepoSettingsProcessor implements IRepoSettingsProcessor {
 
     // Update main settings via PATCH /repos
     if (Object.keys(mainSettings).length > 0) {
-      await this.strategy.updateSettings(repoInfo, mainSettings, options);
+      await this.strategy.update(repoInfo, mainSettings, options);
     }
 
     // Handle vulnerability alerts (separate endpoint)
     // Must be done before automated security fixes
     if (vulnerabilityAlerts !== undefined) {
-      await this.strategy.setVulnerabilityAlerts(
+      await this.strategy.updateVulnerabilityAlerts(
         repoInfo,
         vulnerabilityAlerts,
         options
@@ -200,7 +190,7 @@ export class RepoSettingsProcessor implements IRepoSettingsProcessor {
 
     // Handle private vulnerability reporting (separate endpoint)
     if (privateVulnerabilityReporting !== undefined) {
-      await this.strategy.setPrivateVulnerabilityReporting(
+      await this.strategy.updatePrivateVulnerabilityReporting(
         repoInfo,
         privateVulnerabilityReporting,
         options
@@ -210,7 +200,7 @@ export class RepoSettingsProcessor implements IRepoSettingsProcessor {
     // Handle automated security fixes (separate endpoint)
     // Done last to ensure vulnerability alerts have been fully processed
     if (automatedSecurityFixes !== undefined) {
-      await this.strategy.setAutomatedSecurityFixes(
+      await this.strategy.updateAutomatedSecurityFixes(
         repoInfo,
         automatedSecurityFixes,
         options
@@ -218,31 +208,24 @@ export class RepoSettingsProcessor implements IRepoSettingsProcessor {
     }
   }
 
-  /**
-   * Validates that desired security settings are compatible with the repo's
-   * visibility and owner type. Returns error messages for incompatible settings.
-   */
   private validateSecuritySettings(
     desiredSettings: GitHubRepoSettings,
-    currentSettings: CurrentRepoSettings
+    metadata: RepoMetadata
   ): string[] {
     const errors: string[] = [];
-    const isPublic = currentSettings.visibility === "public";
+    const effectiveVisibility =
+      desiredSettings.visibility ?? metadata.visibility;
+    const isPublic = effectiveVisibility === "public";
 
-    // privateVulnerabilityReporting is only available on public repos
     if (desiredSettings.privateVulnerabilityReporting === true && !isPublic) {
       errors.push(
         "privateVulnerabilityReporting is only available for public repositories"
       );
     }
 
-    // secretScanning and secretScanningPushProtection:
-    // - Available on public repos (free)
-    // - Available on org private/internal repos with GHAS (security_and_analysis is populated)
-    // - NOT available on user private repos or org private/internal repos without GHAS
     if (!isPublic) {
-      const isUserOwned = currentSettings.owner_type === "User";
-      const hasGHAS = currentSettings.security_and_analysis != null;
+      const isUserOwned = metadata.ownerType === "User";
+      const hasGHAS = metadata.hasGHAS;
 
       if (
         desiredSettings.secretScanning === true &&
@@ -264,24 +247,5 @@ export class RepoSettingsProcessor implements IRepoSettingsProcessor {
     }
 
     return errors;
-  }
-
-  /**
-   * Resolves a GitHub App installation token for the given repo.
-   * Returns undefined if no token manager or token resolution fails.
-   */
-  private async getInstallationToken(
-    repoInfo: GitHubRepoInfo
-  ): Promise<string | undefined> {
-    if (!this.tokenManager) {
-      return undefined;
-    }
-
-    try {
-      const token = await this.tokenManager.getTokenForRepo(repoInfo);
-      return token ?? undefined;
-    } catch {
-      return undefined;
-    }
   }
 }

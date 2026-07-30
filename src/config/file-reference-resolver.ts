@@ -3,8 +3,10 @@ import { resolve, isAbsolute, normalize, extname, relative } from "node:path";
 import JSON5 from "json5";
 import { parse as parseYaml } from "yaml";
 import type { ContentValue, RawConfig } from "./types.js";
+import { toErrorMessage } from "../shared/type-guards.js";
+import { ValidationError } from "../shared/errors.js";
 
-export interface FileReferenceOptions {
+interface FileReferenceOptions {
   configDir: string;
 }
 
@@ -28,12 +30,14 @@ export function resolveFileReference(
   const relativePath = reference.slice(1); // Remove @ prefix
 
   if (relativePath.length === 0) {
-    throw new Error(`Invalid file reference "${reference}": path is empty`);
+    throw new ValidationError(
+      `Invalid file reference "${reference}": path is empty`
+    );
   }
 
   // Security: block absolute paths
   if (isAbsolute(relativePath)) {
-    throw new Error(
+    throw new ValidationError(
       `File reference "${reference}" uses absolute path. Use relative paths only.`
     );
   }
@@ -48,7 +52,7 @@ export function resolveFileReference(
   // where normalize() returns paths with backslash separators.
   const pathFromConfig = relative(normalizedConfigDir, normalizedResolved);
   if (pathFromConfig.startsWith("..") || isAbsolute(pathFromConfig)) {
-    throw new Error(
+    throw new ValidationError(
       `File reference "${reference}" escapes config directory. ` +
         `References must be within "${configDir}".`
     );
@@ -59,39 +63,49 @@ export function resolveFileReference(
   try {
     content = readFileSync(resolvedPath, "utf-8");
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to load file reference "${reference}": ${msg}`);
+    const msg = toErrorMessage(error);
+    throw new ValidationError(
+      `Failed to load file reference "${reference}": ${msg}`,
+      { cause: error }
+    );
   }
 
   // Parse based on extension
   const ext = extname(relativePath).toLowerCase();
   if (ext === ".json") {
-    try {
-      return JSON.parse(content) as Record<string, unknown>;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid JSON in "${reference}": ${msg}`);
-    }
+    return parseWithContext(
+      () => JSON.parse(content),
+      `Invalid JSON in "${reference}"`
+    );
   }
   if (ext === ".json5") {
-    try {
-      return JSON5.parse(content) as Record<string, unknown>;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid JSON5 in "${reference}": ${msg}`);
-    }
+    return parseWithContext(
+      () => JSON5.parse(content),
+      `Invalid JSON5 in "${reference}"`
+    );
   }
   if (ext === ".yaml" || ext === ".yml") {
-    try {
-      return parseYaml(content) as Record<string, unknown>;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid YAML in "${reference}": ${msg}`);
-    }
+    return parseWithContext(
+      () => parseYaml(content),
+      `Invalid YAML in "${reference}"`
+    );
   }
 
   // Text file - return as string
   return content;
+}
+
+function parseWithContext(
+  fn: () => ContentValue,
+  errorPrefix: string
+): ContentValue {
+  try {
+    return fn();
+  } catch (error) {
+    throw new ValidationError(`${errorPrefix}: ${toErrorMessage(error)}`, {
+      cause: error,
+    });
+  }
 }
 
 /**
@@ -115,6 +129,31 @@ function resolveContentValue(
   return value;
 }
 
+function resolveContentInFilesMap(
+  filesMap: Record<string, unknown> | undefined,
+  configDir: string
+): void {
+  if (!filesMap) {
+    return;
+  }
+  for (const [fileName, fileConfig] of Object.entries(filesMap)) {
+    if (fileConfig === false) {
+      continue;
+    }
+    if (
+      fileConfig &&
+      typeof fileConfig === "object" &&
+      "content" in fileConfig
+    ) {
+      const typed = fileConfig as { content?: ContentValue };
+      const resolved = resolveContentValue(typed.content, configDir);
+      if (resolved !== undefined) {
+        filesMap[fileName] = { ...fileConfig, content: resolved };
+      }
+    }
+  }
+}
+
 /**
  * Resolve all file references in a raw config.
  * Walks through files at root level and per-repo level.
@@ -132,7 +171,7 @@ export function resolveFileReferencesInConfig(
   if (result.prTemplate && isFileReference(result.prTemplate)) {
     const resolved = resolveFileReference(result.prTemplate, configDir);
     if (typeof resolved !== "string") {
-      throw new Error(
+      throw new ValidationError(
         `prTemplate file reference "${result.prTemplate}" must resolve to a text file, not JSON/YAML`
       );
     }
@@ -140,45 +179,38 @@ export function resolveFileReferencesInConfig(
   }
 
   // Resolve root-level file content
-  if (result.files) {
-    for (const [fileName, fileConfig] of Object.entries(result.files)) {
-      if (
-        fileConfig &&
-        typeof fileConfig === "object" &&
-        "content" in fileConfig
-      ) {
-        const resolved = resolveContentValue(fileConfig.content, configDir);
-        if (resolved !== undefined) {
-          result.files[fileName] = { ...fileConfig, content: resolved };
-        }
-      }
+  resolveContentInFilesMap(
+    result.files as Record<string, unknown> | undefined,
+    configDir
+  );
+
+  // Resolve group-level file content
+  if (result.groups) {
+    for (const group of Object.values(result.groups)) {
+      resolveContentInFilesMap(
+        group.files as Record<string, unknown> | undefined,
+        configDir
+      );
+    }
+  }
+
+  // Resolve conditional group file content
+  if (result.conditionalGroups) {
+    for (const cg of result.conditionalGroups) {
+      resolveContentInFilesMap(
+        cg.files as Record<string, unknown> | undefined,
+        configDir
+      );
     }
   }
 
   // Resolve per-repo file content
   if (result.repos) {
     for (const repo of result.repos) {
-      if (repo.files) {
-        for (const [fileName, fileOverride] of Object.entries(repo.files)) {
-          // Skip false (exclusion) entries
-          if (fileOverride === false) {
-            continue;
-          }
-          if (
-            fileOverride &&
-            typeof fileOverride === "object" &&
-            "content" in fileOverride
-          ) {
-            const resolved = resolveContentValue(
-              fileOverride.content,
-              configDir
-            );
-            if (resolved !== undefined) {
-              repo.files[fileName] = { ...fileOverride, content: resolved };
-            }
-          }
-        }
-      }
+      resolveContentInFilesMap(
+        repo.files as Record<string, unknown> | undefined,
+        configDir
+      );
     }
   }
 

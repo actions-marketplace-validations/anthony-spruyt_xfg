@@ -1,79 +1,52 @@
 import {
   rmSync,
   existsSync,
+  statSync,
   mkdirSync,
   writeFileSync,
   readFileSync,
   chmodSync,
 } from "node:fs";
 import { join, resolve, relative, isAbsolute, dirname } from "node:path";
-import { escapeShellArg } from "../shared/shell-utils.js";
-import {
-  ICommandExecutor,
-  defaultExecutor,
-} from "../shared/command-executor.js";
-import { withRetry } from "../shared/retry-utils.js";
-import { logger } from "../shared/logger.js";
-
-export interface IGitOps {
-  cleanWorkspace(): void;
-  clone(gitUrl: string): Promise<void>;
-  fetch(options?: { prune?: boolean }): Promise<void>;
-  createBranch(branchName: string): Promise<void>;
-  commit(message: string): Promise<boolean>;
-  push(branchName: string, options?: { force?: boolean }): Promise<void>;
-  getDefaultBranch(): Promise<{ branch: string; method: string }>;
-  writeFile(fileName: string, content: string): void;
-  setExecutable(fileName: string): Promise<void>;
-  getFileContent(fileName: string): string | null;
-  deleteFile(fileName: string): void;
-  wouldChange(fileName: string, content: string): boolean;
-  hasChanges(): Promise<boolean>;
-  getChangedFiles(): Promise<string[]>;
-  hasStagedChanges(): Promise<boolean>;
-  fileExistsOnBranch(fileName: string, branch: string): Promise<boolean>;
-  fileExists(fileName: string): boolean;
-}
+import type { ICommandExecutor } from "../shared/command-executor.js";
+import type { DebugLog } from "../shared/logger.js";
+import { toErrorMessage } from "../shared/type-guards.js";
+import { ValidationError, SyncError } from "../shared/errors.js";
+import type { ILocalGitOps } from "./types.js";
 
 export interface GitOpsOptions {
   workDir: string;
   dryRun?: boolean;
-  executor?: ICommandExecutor;
-  /** Number of retries for network operations (default: 3) */
-  retries?: number;
+  executor: ICommandExecutor;
+  /** Optional logger for debug messages */
+  log?: DebugLog;
 }
 
-export class GitOps implements IGitOps {
-  private workDir: string;
-  private dryRun: boolean;
-  private executor: ICommandExecutor;
-  private retries: number;
+export class GitOps implements ILocalGitOps {
+  private readonly workDir: string;
+  private readonly dryRun: boolean;
+  private readonly executor: ICommandExecutor;
+  private readonly log?: DebugLog;
 
   constructor(options: GitOpsOptions) {
     this.workDir = options.workDir;
     this.dryRun = options.dryRun ?? false;
-    this.executor = options.executor ?? defaultExecutor;
-    this.retries = options.retries ?? 3;
+    this.executor = options.executor;
+    this.log = options.log;
   }
 
-  private async exec(command: string, cwd?: string): Promise<string> {
-    return this.executor.exec(command, cwd ?? this.workDir);
-  }
-
-  /**
-   * Run a command with retry logic for transient failures.
-   * Used for network operations like clone, fetch, push.
-   */
-  private async execWithRetry(command: string, cwd?: string): Promise<string> {
-    return withRetry(() => this.exec(command, cwd), {
-      retries: this.retries,
-    });
+  private exec(
+    executable: string,
+    args: string[],
+    cwd?: string
+  ): Promise<string> {
+    return this.executor.exec(executable, args, cwd ?? this.workDir);
   }
 
   /**
    * Validates that a file path doesn't escape the workspace directory.
    * @returns The resolved absolute file path
-   * @throws Error if path traversal is detected
+   * @throws ValidationError if path traversal is detected
    */
   private validatePath(fileName: string): string {
     const filePath = join(this.workDir, fileName);
@@ -81,32 +54,23 @@ export class GitOps implements IGitOps {
     const resolvedWorkDir = resolve(this.workDir);
     const relativePath = relative(resolvedWorkDir, resolvedPath);
     if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
-      throw new Error(`Path traversal detected: ${fileName}`);
+      throw new ValidationError(`Path traversal detected: ${fileName}`);
     }
     return filePath;
   }
 
   cleanWorkspace(): void {
-    if (existsSync(this.workDir)) {
-      rmSync(this.workDir, { recursive: true, force: true });
+    try {
+      if (existsSync(this.workDir)) {
+        rmSync(this.workDir, { recursive: true, force: true });
+      }
+      mkdirSync(this.workDir, { recursive: true });
+    } catch (error) {
+      throw new SyncError(
+        `Failed to clean workspace '${this.workDir}': ${toErrorMessage(error)}`,
+        { cause: error }
+      );
     }
-    mkdirSync(this.workDir, { recursive: true });
-  }
-
-  async clone(gitUrl: string): Promise<void> {
-    await this.execWithRetry(
-      `git clone ${escapeShellArg(gitUrl)} .`,
-      this.workDir
-    );
-  }
-
-  /**
-   * Fetch from remote with optional pruning of stale refs.
-   * Used to update local tracking refs after remote branch deletion.
-   */
-  async fetch(options?: { prune?: boolean }): Promise<void> {
-    const pruneFlag = options?.prune ? " --prune" : "";
-    await this.execWithRetry(`git fetch origin${pruneFlag}`, this.workDir);
   }
 
   /**
@@ -116,13 +80,13 @@ export class GitOps implements IGitOps {
    */
   async createBranch(branchName: string): Promise<void> {
     try {
-      await this.exec(
-        `git checkout -b ${escapeShellArg(branchName)}`,
-        this.workDir
-      );
+      await this.exec("git", ["checkout", "-b", branchName]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to create branch '${branchName}': ${message}`);
+      const message = toErrorMessage(error);
+      throw new SyncError(
+        `Failed to create branch '${branchName}': ${message}`,
+        { cause: error }
+      );
     }
   }
 
@@ -132,12 +96,17 @@ export class GitOps implements IGitOps {
     }
     const filePath = this.validatePath(fileName);
 
-    // Create parent directories if they don't exist
-    mkdirSync(dirname(filePath), { recursive: true });
+    try {
+      mkdirSync(dirname(filePath), { recursive: true });
 
-    // Normalize trailing newline - ensure exactly one
-    const normalized = content.endsWith("\n") ? content : content + "\n";
-    writeFileSync(filePath, normalized, "utf-8");
+      const normalized = content.endsWith("\n") ? content : content + "\n";
+      writeFileSync(filePath, normalized, "utf-8");
+    } catch (error) {
+      throw new SyncError(
+        `Failed to write file '${fileName}': ${toErrorMessage(error)}`,
+        { cause: error }
+      );
+    }
   }
 
   /**
@@ -152,15 +121,57 @@ export class GitOps implements IGitOps {
     }
     const filePath = this.validatePath(fileName);
 
-    // Set filesystem permissions (755 = rwxr-xr-x)
-    chmodSync(filePath, 0o755);
+    try {
+      chmodSync(filePath, 0o755);
+    } catch (error) {
+      throw new SyncError(
+        `Failed to set executable permissions on '${fileName}': ${toErrorMessage(error)}`,
+        { cause: error }
+      );
+    }
 
-    // Also update git's index so the executable bit is committed
     const relativePath = relative(this.workDir, filePath);
-    await this.exec(
-      `git update-index --add --chmod=+x ${escapeShellArg(relativePath)}`,
-      this.workDir
-    );
+    await this.exec("git", [
+      "update-index",
+      "--add",
+      "--chmod=+x",
+      "--",
+      relativePath,
+    ]);
+  }
+
+  /**
+   * Clears the executable bit on a file both on the filesystem and in git's index.
+   * Symmetric inverse of setExecutable.
+   * @param fileName - The file path relative to the work directory
+   */
+  async clearExecutable(fileName: string): Promise<void> {
+    if (this.dryRun) return;
+    const filePath = this.validatePath(fileName);
+    try {
+      chmodSync(filePath, 0o644);
+    } catch (error) {
+      throw new SyncError(
+        `Failed to clear executable permissions on '${fileName}': ${toErrorMessage(error)}`,
+        { cause: error }
+      );
+    }
+    await this.exec("git", ["update-index", "--chmod=-x", "--", fileName]);
+  }
+
+  /**
+   * Returns the git index mode for a tracked file ("100755" or "100644"),
+   * or null if the file is not tracked.
+   * @param fileName - The file path relative to the work directory
+   */
+  async getFileMode(fileName: string): Promise<"100755" | "100644" | null> {
+    this.validatePath(fileName);
+    const output = await this.exec("git", ["ls-files", "-s", "--", fileName]);
+    const line = output.trim();
+    if (!line) return null;
+    const mode = line.split(/\s+/, 1)[0];
+    if (mode === "100755" || mode === "100644") return mode;
+    return null;
   }
 
   /**
@@ -170,14 +181,18 @@ export class GitOps implements IGitOps {
   getFileContent(fileName: string): string | null {
     const filePath = this.validatePath(fileName);
 
-    if (!existsSync(filePath)) {
-      return null;
-    }
-
     try {
+      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+        return null;
+      }
+
       return readFileSync(filePath, "utf-8");
-    } catch {
-      return null;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EACCES") {
+        return null;
+      }
+      throw error;
     }
   }
 
@@ -199,24 +214,29 @@ export class GitOps implements IGitOps {
     try {
       const existingContent = readFileSync(filePath, "utf-8");
       return existingContent !== newContent;
-    } catch {
-      // If we can't read the file, assume it would change
-      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EACCES") {
+        this.log?.debug(
+          `Failed to read ${fileName} for comparison: ${toErrorMessage(error)}`
+        );
+        return true;
+      }
+      throw error;
     }
   }
 
   async hasChanges(): Promise<boolean> {
-    const status = await this.exec("git status --porcelain", this.workDir);
+    const status = await this.exec("git", ["status", "--porcelain"]);
     return status.length > 0;
   }
 
   /**
    * Get list of files that have changes according to git status.
    * Returns relative file paths for files that are modified, added, or untracked.
-   * Uses the same this.exec() pattern as other methods in this class.
    */
   async getChangedFiles(): Promise<string[]> {
-    const status = await this.exec("git status --porcelain", this.workDir);
+    const status = await this.exec("git", ["status", "--porcelain"]);
     if (!status) return [];
 
     return status
@@ -225,17 +245,13 @@ export class GitOps implements IGitOps {
       .map((line) => line.slice(3)); // Remove status prefix (e.g., " M ", "?? ", "A  ")
   }
 
-  /**
-   * Check if there are staged changes ready to commit.
-   * Uses `git diff --cached --quiet` which exits with 1 if there are staged changes.
-   */
+  async stageAll(): Promise<void> {
+    await this.exec("git", ["add", "-A"]);
+  }
+
   async hasStagedChanges(): Promise<boolean> {
-    try {
-      await this.exec("git diff --cached --quiet", this.workDir);
-      return false; // Exit code 0 = no staged changes
-    } catch {
-      return true; // Exit code 1 = there are staged changes
-    }
+    const diff = await this.exec("git", ["diff", "--cached", "--name-only"]);
+    return diff.length > 0;
   }
 
   /**
@@ -243,20 +259,30 @@ export class GitOps implements IGitOps {
    * Used for createOnly checks against the base branch (not the working directory).
    */
   async fileExistsOnBranch(fileName: string, branch: string): Promise<boolean> {
-    try {
-      await this.exec(
-        `git show ${escapeShellArg(branch)}:${escapeShellArg(fileName)}`,
-        this.workDir
+    if (branch.startsWith("-")) {
+      throw new ValidationError(
+        `Branch name '${branch}' is not supported: branch names starting with '-' can be misinterpreted as git flags`
       );
+    }
+    try {
+      await this.exec("git", ["show", `${branch}:${fileName}`]);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      const message = toErrorMessage(error);
+      if (
+        message.includes("does not exist") ||
+        message.includes("did not match") ||
+        message.includes("not found")
+      ) {
+        this.log?.debug(
+          `fileExistsOnBranch(${fileName}, ${branch}): ${message}`
+        );
+        return false;
+      }
+      throw error;
     }
   }
 
-  /**
-   * Check if a file exists in the working directory.
-   */
   fileExists(fileName: string): boolean {
     const filePath = this.validatePath(fileName);
     return existsSync(filePath);
@@ -275,116 +301,63 @@ export class GitOps implements IGitOps {
     const filePath = this.validatePath(fileName);
 
     if (!existsSync(filePath)) {
-      return; // File doesn't exist, nothing to delete
+      return;
     }
 
-    rmSync(filePath);
+    try {
+      rmSync(filePath);
+    } catch (error) {
+      throw new SyncError(
+        `Failed to delete file '${fileName}': ${toErrorMessage(error)}`,
+        { cause: error }
+      );
+    }
   }
 
   /**
    * Stage all changes and commit with the given message.
    * Uses --no-verify to skip pre-commit hooks (config sync should always succeed).
-   * @returns true if a commit was made, false if there were no staged changes
+   * @returns true if a commit was made, or false if there were no staged changes. In dry-run mode, always returns true without inspecting the working tree.
    */
   async commit(message: string): Promise<boolean> {
     if (this.dryRun) {
       return true;
     }
-    await this.exec("git add -A", this.workDir);
+    await this.exec("git", ["add", "-A"]);
 
     // Check if there are actually staged changes after git add
     if (!(await this.hasStagedChanges())) {
       return false; // No changes to commit
     }
 
-    // Use --no-verify to skip pre-commit hooks
-    await this.exec(
-      `git commit --no-verify -m ${escapeShellArg(message)}`,
-      this.workDir
-    );
+    await this.exec("git", ["commit", "--no-verify", "-m", message]);
     return true;
   }
 
-  async push(branchName: string, options?: { force?: boolean }): Promise<void> {
-    if (this.dryRun) {
-      return;
-    }
-    const forceFlag = options?.force ? "--force-with-lease " : "";
-    await this.execWithRetry(
-      `git push ${forceFlag}-u origin ${escapeShellArg(branchName)}`,
-      this.workDir
-    );
-  }
-
-  async getDefaultBranch(): Promise<{ branch: string; method: string }> {
+  /**
+   * Fallback default branch detection using local refs only.
+   * Checks origin/main, then origin/master, then defaults to "main".
+   */
+  async getDefaultBranchLocal(): Promise<{
+    branch: string;
+    method: string;
+  }> {
     try {
-      // Try to get the default branch from remote (network operation with retry)
-      const remoteInfo = await this.execWithRetry(
-        "git remote show origin",
-        this.workDir
-      );
-      const match = remoteInfo.match(/HEAD branch: (\S+)/);
-      if (match && match[1] !== "(unknown)") {
-        return { branch: match[1], method: "remote HEAD" };
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.info(`Debug: git remote show origin failed - ${msg}`);
-    }
-
-    // Try common default branch names (local operations, no retry needed)
-    try {
-      await this.exec("git rev-parse --verify origin/main", this.workDir);
+      await this.exec("git", ["rev-parse", "--verify", "origin/main"]);
       return { branch: "main", method: "origin/main exists" };
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.info(`Debug: origin/main check failed - ${msg}`);
+      const msg = toErrorMessage(error);
+      this.log?.debug(`origin/main check failed - ${msg}`);
     }
 
     try {
-      await this.exec("git rev-parse --verify origin/master", this.workDir);
+      await this.exec("git", ["rev-parse", "--verify", "origin/master"]);
       return { branch: "master", method: "origin/master exists" };
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.info(`Debug: origin/master check failed - ${msg}`);
+      const msg = toErrorMessage(error);
+      this.log?.debug(`origin/master check failed - ${msg}`);
     }
 
     return { branch: "main", method: "fallback default" };
-  }
-}
-
-export function sanitizeBranchName(fileName: string): string {
-  return fileName
-    .toLowerCase()
-    .replace(/\.[^.]+$/, "") // Remove extension
-    .replace(/[^a-z0-9-]/g, "-") // Replace non-alphanumeric with dashes
-    .replace(/-+/g, "-") // Collapse multiple dashes
-    .replace(/^-|-$/g, ""); // Remove leading/trailing dashes
-}
-
-/**
- * Validates a user-provided branch name against git's naming rules.
- * @throws Error if the branch name is invalid
- */
-export function validateBranchName(branchName: string): void {
-  if (!branchName || branchName.trim() === "") {
-    throw new Error("Branch name cannot be empty");
-  }
-
-  if (branchName.startsWith(".") || branchName.startsWith("-")) {
-    throw new Error('Branch name cannot start with "." or "-"');
-  }
-
-  // Git disallows: space, ~, ^, :, ?, *, [, \, and consecutive dots (..)
-  if (/[\s~^:?*[\\]/.test(branchName) || branchName.includes("..")) {
-    throw new Error("Branch name contains invalid characters");
-  }
-
-  if (
-    branchName.endsWith("/") ||
-    branchName.endsWith(".lock") ||
-    branchName.endsWith(".")
-  ) {
-    throw new Error("Branch name has invalid ending");
   }
 }

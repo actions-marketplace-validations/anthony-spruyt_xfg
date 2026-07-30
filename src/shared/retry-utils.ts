@@ -1,14 +1,15 @@
 import pRetry, { AbortError } from "p-retry";
-import { logger } from "./logger.js";
+import { getStderr } from "./command-executor.js";
 import { sanitizeCredentials } from "./sanitize-utils.js";
+import { ValidationError, type RateLimitedError } from "./errors.js";
 
 /**
- * Default patterns indicating permanent errors that should NOT be retried.
- * These typically indicate configuration issues, auth failures, or invalid resources.
- * Export allows customization for different environments.
+ * Core permanent error patterns shared across all strategies (API, GraphQL, CLI).
+ * Auth failures, permission issues, and resource-not-found errors.
  */
-export const DEFAULT_PERMANENT_ERROR_PATTERNS: RegExp[] = [
+export const CORE_PERMANENT_ERROR_PATTERNS: RegExp[] = [
   /permission\s*denied/i,
+  /not\s*accessible\s*by\s*integration/i,
   /authentication\s*failed/i,
   /bad\s*credentials/i,
   /invalid\s*(token|credentials)/i,
@@ -16,19 +17,37 @@ export const DEFAULT_PERMANENT_ERROR_PATTERNS: RegExp[] = [
   /401\b/,
   /403\b/,
   /404\b/,
+  /422\b/,
   /not\s*found/i,
   /does\s*not\s*exist/i,
   /repository\s*not\s*found/i,
+  /set\s+the\s+GH_TOKEN\s+environment\s+variable/i,
+  /GITHUB_TOKEN\s+environment\s+variable/i,
+  /set\s+the\s+AZURE_DEVOPS_EXT_PAT\s+environment\s+variable/i,
+  /GITLAB_TOKEN\s+environment\s+variable/i,
+];
+
+export const BRANCH_PROTECTION_ERROR_PATTERNS: RegExp[] = [
+  /rejected/i,
+  /protected\s*branch/i,
+  /protected/i,
+  /denied/i,
+  /required\s*status\s*check/i,
+  /push\s*rules?\s*prevent/i,
+];
+
+/**
+ * Default patterns indicating permanent errors that should NOT be retried.
+ * Extends CORE_PERMANENT_ERROR_PATTERNS with git-CLI-specific patterns.
+ */
+export const DEFAULT_PERMANENT_ERROR_PATTERNS: RegExp[] = [
+  ...CORE_PERMANENT_ERROR_PATTERNS,
   /no\s*such\s*(file|directory|remote|ref)/i,
   /couldn't\s*find\s*remote\s*ref/i,
   /invalid\s*remote/i,
   /not\s*a\s*git\s*repository/i,
   /non-fast-forward/i,
   /remote\s*rejected/i,
-  /set\s+the\s+GH_TOKEN\s+environment\s+variable/i,
-  /GITHUB_TOKEN\s+environment\s+variable/i,
-  /set\s+the\s+AZURE_DEVOPS_EXT_PAT\s+environment\s+variable/i,
-  /GITLAB_TOKEN\s+environment\s+variable/i,
 ];
 
 /**
@@ -36,7 +55,7 @@ export const DEFAULT_PERMANENT_ERROR_PATTERNS: RegExp[] = [
  * These typically indicate temporary network or service issues.
  * Export allows customization for different environments.
  */
-export const DEFAULT_TRANSIENT_ERROR_PATTERNS: RegExp[] = [
+const DEFAULT_TRANSIENT_ERROR_PATTERNS: RegExp[] = [
   /timed?\s*out/i,
   /ETIMEDOUT/,
   /ECONNRESET/,
@@ -61,7 +80,42 @@ export const DEFAULT_TRANSIENT_ERROR_PATTERNS: RegExp[] = [
   /unable\s*to\s*access/i,
 ];
 
-export interface RetryOptions {
+/**
+ * Patterns that specifically indicate rate limiting (a subset of transient errors).
+ * Used to apply longer backoff delays -- connection resets and 5xx errors
+ * should NOT get 60-second waits.
+ */
+const RATE_LIMIT_PATTERNS: RegExp[] = [
+  /rate\s*limit/i,
+  /too\s*many\s*requests/i,
+  /abuse\s*detection/i,
+];
+
+/**
+ * Checks if an error specifically indicates a rate limit (not just any transient error).
+ * Rate limit errors need longer backoff (60s+) compared to network errors (1-4s).
+ */
+export function isRateLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const combined = `${message} ${getStderr(error)}`;
+
+  for (const pattern of RATE_LIMIT_PATTERNS) {
+    if (pattern.test(combined)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Default delay (seconds) for rate limit errors when no Retry-After header is available. */
+const RATE_LIMIT_FALLBACK_DELAY_SECONDS = 60;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface RetryOptions {
   /** Maximum number of retries (default: 3) */
   retries?: number;
   /** Callback when a retry attempt fails */
@@ -70,22 +124,26 @@ export interface RetryOptions {
   permanentErrorPatterns?: RegExp[];
   /** Custom transient error patterns (defaults to DEFAULT_TRANSIENT_ERROR_PATTERNS) */
   transientErrorPatterns?: RegExp[];
+  /** Logger for retry messages (defaults to no logging) */
+  log?: { info(msg: string): void };
+  /** Override for delay function (test injection) */
+  _delay?: (ms: number) => Promise<void>;
 }
 
 /**
  * Classifies an error as permanent (should not retry) or transient (should retry).
- * @param error The error to classify
- * @param patterns Custom patterns to use (defaults to DEFAULT_PERMANENT_ERROR_PATTERNS)
- * @returns true if the error is permanent, false if it might be transient
  */
 export function isPermanentError(
-  error: Error,
+  error: unknown,
   patterns: RegExp[] = DEFAULT_PERMANENT_ERROR_PATTERNS
 ): boolean {
-  const message = error.message;
-  const stderr =
-    (error as { stderr?: string | Buffer }).stderr?.toString() ?? "";
-  const combined = `${message} ${stderr}`;
+  // Validation errors are always permanent — no point retrying bad input
+  if (error instanceof ValidationError) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const combined = `${message} ${getStderr(error)}`;
 
   // Check permanent patterns first - these always stop retries
   for (const pattern of patterns) {
@@ -99,18 +157,13 @@ export function isPermanentError(
 
 /**
  * Checks if an error matches known transient patterns.
- * @param error The error to check
- * @param patterns Custom patterns to use (defaults to DEFAULT_TRANSIENT_ERROR_PATTERNS)
- * @returns true if the error appears to be transient
  */
 export function isTransientError(
-  error: Error,
+  error: unknown,
   patterns: RegExp[] = DEFAULT_TRANSIENT_ERROR_PATTERNS
 ): boolean {
-  const message = error.message;
-  const stderr =
-    (error as { stderr?: string | Buffer }).stderr?.toString() ?? "";
-  const combined = `${message} ${stderr}`;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const combined = `${message} ${getStderr(error)}`;
 
   for (const pattern of patterns) {
     if (pattern.test(combined)) {
@@ -128,7 +181,7 @@ export function isTransientError(
  * @param fn The async function to run with retry
  * @param options Retry configuration options
  * @returns The result of the function if successful
- * @throws AbortError for permanent failures, or the last error after all retries exhausted
+ * @throws The original error for permanent failures (pRetry unwraps AbortError before propagating), or the last transient error after all retries exhausted
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
@@ -144,22 +197,34 @@ export async function withRetry<T>(
       } catch (error) {
         if (
           error instanceof Error &&
+          !isTransientError(error, options?.transientErrorPatterns) &&
           isPermanentError(error, permanentPatterns)
         ) {
           // Wrap in AbortError to stop retrying immediately
-          throw new AbortError(error.message);
+          throw new AbortError(error);
         }
         throw error;
       }
     },
     {
       retries,
-      onFailedAttempt: (context) => {
-        // Only log if this isn't the last attempt
+      onFailedAttempt: async (context) => {
+        // Apply rate-limit-specific delay before the next retry
+        if (context.retriesLeft > 0 && isRateLimitError(context.error)) {
+          const retryAfterSeconds =
+            (context.error as RateLimitedError).retryAfter ??
+            RATE_LIMIT_FALLBACK_DELAY_SECONDS;
+          options?.log?.info(
+            `Rate limited. Waiting ${retryAfterSeconds}s before retry...`
+          );
+          await (options?._delay ?? delay)(retryAfterSeconds * 1000);
+        }
+
+        // Log the failure (existing behavior)
         if (context.retriesLeft > 0) {
           const msg =
             sanitizeCredentials(context.error.message) || "Unknown error";
-          logger.info(
+          options?.log?.info(
             `Attempt ${context.attemptNumber}/${retries + 1} failed: ${msg}. Retrying...`
           );
           options?.onRetry?.(context.error, context.attemptNumber);
@@ -168,21 +233,3 @@ export async function withRetry<T>(
     }
   );
 }
-
-/**
- * Wraps a synchronous operation in a Promise for use with retry logic.
- * @param fn The sync function to run
- * @returns A Promise that resolves/rejects with the sync result
- */
-export function promisify<T>(fn: () => T): Promise<T> {
-  return new Promise((resolve, reject) => {
-    try {
-      resolve(fn());
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-// Re-export AbortError for use in custom error handling
-export { AbortError } from "p-retry";

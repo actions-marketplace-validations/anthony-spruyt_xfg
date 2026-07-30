@@ -1,36 +1,22 @@
 # Usage
 
-xfg uses subcommands to separate file sync from repository settings management.
-
-## Commands
-
-| Command        | Description                                      |
-| -------------- | ------------------------------------------------ |
-| `xfg sync`     | Sync configuration files across repositories     |
-| `xfg settings` | Manage GitHub repository settings and rulesets   |
+xfg uses a single `sync` command to handle file synchronization, repository settings, rulesets, and labels.
 
 ## Basic Usage
 
 ```bash
-# Sync files
+# Sync files, settings, rulesets, and labels
 xfg sync --config ./config.yaml
 
-# Apply rulesets
-xfg settings --config ./config.yaml
-
-# Dry run
+# Dry run — preview changes without applying
 xfg sync --config ./config.yaml --dry-run
-xfg settings --config ./config.yaml --dry-run
-
-# Combined workflow
-xfg sync -c config.yaml && xfg settings -c config.yaml
 ```
 
 ## Dry-Run Mode
 
 The `--dry-run` flag lets you preview changes without actually making them.
 
-**For sync:**
+**For files:**
 
 - Files are compared but not written
 - Commits and pushes are skipped
@@ -39,14 +25,35 @@ The `--dry-run` flag lets you preview changes without actually making them.
 **For settings:**
 
 - Rulesets are compared but not created/updated/deleted
+- Labels are compared but not created/updated/deleted
+- Repository settings are compared but not applied
 - Shows planned changes (create, update, delete, unchanged)
 
 ```bash
 xfg sync --config ./config.yaml --dry-run
-xfg settings --config ./config.yaml --dry-run
 ```
 
-## Sync CLI Options
+### Content Diffs for JSON/YAML Files
+
+For structured data files (`.json`, `.json5`, `.yaml`, `.yml`), xfg shows unified content diffs in both CLI output and GitHub Step Summary. This applies to all modes (dry-run and apply) and all actions (create, update, delete).
+
+```text
+~ org/repo
+    ~ config.json
+      @@ -1,3 +1,3 @@
+       {
+      -  "old": true
+      +  "new": true
+       }
+    + new-config.yaml
+      @@ -0,0 +1,2 @@
+      +key: value
+      +other: setting
+```
+
+Non-structured files (`.sh`, `.md`, `.txt`, etc.) show only the file path without content diffs.
+
+## CLI Options
 
 | Option             | Alias | Description                                                                    | Required |
 | ------------------ | ----- | ------------------------------------------------------------------------------ | -------- |
@@ -58,25 +65,17 @@ xfg settings --config ./config.yaml --dry-run
 | `--merge`          | `-m`  | PR merge mode: `manual`, `auto` (default), `force` (bypass checks), `direct`   | No       |
 | `--merge-strategy` |       | Merge strategy: `merge`, `squash` (default), `rebase`                          | No       |
 | `--delete-branch`  |       | Delete source branch after merge                                               | No       |
-| `--no-delete`      |       | Skip deletion of orphaned files                                                | No       |
-
-## Settings CLI Options
-
-| Option        | Alias | Description                                    | Required |
-| ------------- | ----- | ---------------------------------------------- | -------- |
-| `--config`    | `-c`  | Path to YAML config file                       | Yes      |
-| `--dry-run`   | `-d`  | Show what would be done without making changes | No       |
-| `--retries`   | `-r`  | Number of retries for network operations       | No       |
-| `--no-delete` |       | Skip deletion of orphaned rulesets             | No       |
+| `--no-delete`      |       | Skip deletion of orphaned files, rulesets, and labels                          | No       |
 
 !!! note
-The settings command only works with GitHub repositories. Azure DevOps and GitLab repos are skipped.
+    Settings management (rulesets, labels, repo settings) only works with GitHub repositories. Azure DevOps and GitLab repos are skipped for settings.
 
 ## Console Output
 
 ```text
 [1/3] Processing example-org/repo1...
   ✓ Cloned repository
+  ✓ Closed existing PR and deleted branch
   ✓ Created branch chore/sync-config
   ✓ Wrote .eslintrc.json
   ✓ Wrote .prettierrc.yaml
@@ -86,7 +85,7 @@ The settings command only works with GitHub repositories. Azure DevOps and GitLa
 
 [2/3] Processing example-org/repo2...
   ✓ Cloned repository
-  ✓ Checked out existing branch chore/sync-config
+  ✓ Created branch chore/sync-config
   ✓ Wrote .eslintrc.json
   ✓ Wrote .prettierrc.yaml
   ⊘ No changes detected, skipping
@@ -98,7 +97,7 @@ The settings command only works with GitHub repositories. Azure DevOps and GitLa
   ✓ Wrote .prettierrc.yaml
   ✓ Committed changes
   ✓ Pushed to remote
-  ✓ PR already exists: https://github.com/example-org/repo3/pull/15
+  ✓ Created PR: https://github.com/example-org/repo3/pull/15
 
 Summary: 2 succeeded, 1 skipped, 0 failed
 ```

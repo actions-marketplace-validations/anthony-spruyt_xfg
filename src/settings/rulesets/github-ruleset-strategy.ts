@@ -1,57 +1,18 @@
-import {
-  ICommandExecutor,
-  defaultExecutor,
-} from "../../shared/command-executor.js";
-import {
-  isGitHubRepo,
-  GitHubRepoInfo,
-  RepoInfo,
-} from "../../shared/repo-detector.js";
-import { escapeShellArg } from "../../shared/shell-utils.js";
-import { withRetry } from "../../shared/retry-utils.js";
+import type { ICommandExecutor } from "../../shared/command-executor.js";
+import { assertGitHubRepo, type RepoInfo } from "../../repo/index.js";
+import { camelToSnake } from "../../shared/string-utils.js";
+import { GhApiClient, type GhApiOptions } from "../../shared/gh-api-utils.js";
+import { parseApiJson } from "../../shared/json-utils.js";
 import type { Ruleset, RulesetRule } from "../../config/index.js";
-import type { IRulesetStrategy } from "./types.js";
-
-// =============================================================================
-// GitHub API Types
-// =============================================================================
-
-/**
- * GitHub Ruleset response from API (snake_case).
- */
-export interface GitHubRuleset {
-  id: number;
-  name: string;
-  target: "branch" | "tag";
-  enforcement: "active" | "disabled" | "evaluate";
-  bypass_actors?: GitHubBypassActor[];
-  conditions?: GitHubRulesetConditions;
-  rules?: GitHubRule[];
-  source_type?: string;
-  source?: string;
-}
-
-export interface GitHubBypassActor {
-  actor_id: number;
-  actor_type: "Team" | "User" | "Integration";
-  bypass_mode?: "always" | "pull_request";
-}
-
-export interface GitHubRulesetConditions {
-  ref_name?: {
-    include?: string[];
-    exclude?: string[];
-  };
-}
-
-export interface GitHubRule {
-  type: string;
-  parameters?: Record<string, unknown>;
-}
-
-// =============================================================================
-// Conversion Functions
-// =============================================================================
+import type {
+  IRulesetStrategy,
+  GitHubRuleset,
+  GitHubBypassActor,
+  GitHubRulesetConditions,
+  GitHubRule,
+  RulesetCreateParams,
+  RulesetUpdateParams,
+} from "./types.js";
 
 /**
  * Converts camelCase config ruleset to snake_case GitHub API format.
@@ -96,7 +57,16 @@ export function configToGitHub(
  * Default parameters for pull_request rules.
  * GitHub API requires all parameters to be present.
  */
-const PULL_REQUEST_DEFAULTS: Record<string, unknown> = {
+interface PullRequestRuleDefaults {
+  required_approving_review_count: number;
+  dismiss_stale_reviews_on_push: boolean;
+  require_code_owner_review: boolean;
+  require_last_push_approval: boolean;
+  required_review_thread_resolution: boolean;
+  allowed_merge_methods: string[];
+}
+
+const PULL_REQUEST_DEFAULTS: PullRequestRuleDefaults = {
   required_approving_review_count: 0,
   dismiss_stale_reviews_on_push: false,
   require_code_owner_review: false,
@@ -168,18 +138,7 @@ function convertValue(value: unknown): unknown {
   return value;
 }
 
-/**
- * Converts camelCase to snake_case.
- */
-function camelToSnake(str: string): string {
-  return str.replace(/([A-Z])/g, "_$1").toLowerCase();
-}
-
-// =============================================================================
-// Payload Types
-// =============================================================================
-
-export interface GitHubRulesetPayload {
+interface GitHubRulesetPayload {
   name: string;
   target: "branch" | "tag";
   enforcement: "active" | "disabled" | "evaluate";
@@ -188,167 +147,81 @@ export interface GitHubRulesetPayload {
   rules?: GitHubRule[];
 }
 
-// =============================================================================
-// Strategy Implementation
-// =============================================================================
-
-export interface RulesetStrategyOptions {
-  token?: string;
-  host?: string;
+interface GitHubRulesetStrategyOptions {
+  retries?: number;
+  cwd: string;
 }
 
-/**
- * GitHub Ruleset Strategy for managing repository rulesets via GitHub REST API.
- * Uses `gh api` CLI for authentication and API calls.
- */
 export class GitHubRulesetStrategy implements IRulesetStrategy {
-  private executor: ICommandExecutor;
+  private api: GhApiClient;
 
-  constructor(executor?: ICommandExecutor) {
-    this.executor = executor ?? defaultExecutor;
+  constructor(
+    executor: ICommandExecutor,
+    options: GitHubRulesetStrategyOptions
+  ) {
+    this.api = new GhApiClient(executor, options.retries ?? 3, options.cwd);
   }
 
-  /**
-   * Lists all rulesets for a repository.
-   */
   async list(
     repoInfo: RepoInfo,
-    options?: RulesetStrategyOptions
+    options?: GhApiOptions
   ): Promise<GitHubRuleset[]> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Ruleset strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/rulesets`;
-    const result = await this.ghApi("GET", endpoint, undefined, options);
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/rulesets`;
+    const result = await this.api.call("GET", endpoint, { options });
 
-    return JSON.parse(result) as GitHubRuleset[];
+    return parseApiJson<GitHubRuleset[]>(result, "rulesets response");
   }
 
-  /**
-   * Gets a single ruleset by ID.
-   */
   async get(
     repoInfo: RepoInfo,
     rulesetId: number,
-    options?: RulesetStrategyOptions
+    options?: GhApiOptions
   ): Promise<GitHubRuleset> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Ruleset strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/rulesets/${rulesetId}`;
-    const result = await this.ghApi("GET", endpoint, undefined, options);
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/rulesets/${rulesetId}`;
+    const result = await this.api.call("GET", endpoint, { options });
 
-    return JSON.parse(result) as GitHubRuleset;
+    return parseApiJson<GitHubRuleset>(result, "ruleset response");
   }
 
-  /**
-   * Creates a new ruleset.
-   */
   async create(
     repoInfo: RepoInfo,
-    name: string,
-    ruleset: Ruleset,
-    options?: RulesetStrategyOptions
-  ): Promise<GitHubRuleset> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    params: RulesetCreateParams,
+    options?: GhApiOptions
+  ): Promise<void> {
+    assertGitHubRepo(repoInfo, "GitHub Ruleset strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/rulesets`;
-    const payload = configToGitHub(name, ruleset);
-    const result = await this.ghApi("POST", endpoint, payload, options);
-
-    return JSON.parse(result) as GitHubRuleset;
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/rulesets`;
+    const payload = configToGitHub(params.name, params.ruleset);
+    await this.api.call("POST", endpoint, { payload, options });
   }
 
-  /**
-   * Updates an existing ruleset.
-   */
   async update(
     repoInfo: RepoInfo,
-    rulesetId: number,
-    name: string,
-    ruleset: Ruleset,
-    options?: RulesetStrategyOptions
-  ): Promise<GitHubRuleset> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    params: RulesetUpdateParams,
+    options?: GhApiOptions
+  ): Promise<void> {
+    assertGitHubRepo(repoInfo, "GitHub Ruleset strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/rulesets/${rulesetId}`;
-    const payload = configToGitHub(name, ruleset);
-    const result = await this.ghApi("PUT", endpoint, payload, options);
-
-    return JSON.parse(result) as GitHubRuleset;
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/rulesets/${params.rulesetId}`;
+    const payload = configToGitHub(params.name, params.ruleset);
+    await this.api.call("PUT", endpoint, {
+      payload,
+      options,
+    });
   }
 
-  /**
-   * Deletes a ruleset.
-   */
   async delete(
     repoInfo: RepoInfo,
     rulesetId: number,
-    options?: RulesetStrategyOptions
+    options?: GhApiOptions
   ): Promise<void> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Ruleset strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/rulesets/${rulesetId}`;
-    await this.ghApi("DELETE", endpoint, undefined, options);
-  }
-
-  /**
-   * Validates that the repo is a GitHub repository.
-   */
-  private validateGitHub(repoInfo: RepoInfo): void {
-    if (!isGitHubRepo(repoInfo)) {
-      throw new Error(
-        `GitHub Ruleset strategy requires GitHub repositories. Got: ${repoInfo.type}`
-      );
-    }
-  }
-
-  /**
-   * Executes a GitHub API call using the gh CLI.
-   */
-  private async ghApi(
-    method: "GET" | "POST" | "PUT" | "DELETE",
-    endpoint: string,
-    payload?: unknown,
-    options?: RulesetStrategyOptions
-  ): Promise<string> {
-    const args: string[] = ["gh", "api"];
-
-    // Add method flag
-    if (method !== "GET") {
-      args.push("-X", method);
-    }
-
-    // Add host flag for GitHub Enterprise
-    if (options?.host && options.host !== "github.com") {
-      args.push("--hostname", escapeShellArg(options.host));
-    }
-
-    // Add endpoint
-    args.push(escapeShellArg(endpoint));
-
-    // Build base command
-    const baseCommand = args.join(" ");
-
-    // Add GH_TOKEN environment variable prefix if token provided
-    // Token is escaped to prevent command injection
-    const tokenPrefix = options?.token
-      ? `GH_TOKEN=${escapeShellArg(options.token)} `
-      : "";
-
-    // For POST/PUT with payload, use echo pipe pattern (same as graphql-commit-strategy)
-    // This is safer than heredoc as escapeShellArg properly escapes the content
-    if (payload && (method === "POST" || method === "PUT")) {
-      const payloadJson = JSON.stringify(payload);
-      const command = `echo ${escapeShellArg(payloadJson)} | ${tokenPrefix}${baseCommand} --input -`;
-      return await withRetry(() => this.executor.exec(command, process.cwd()));
-    }
-
-    // For GET/DELETE, run command directly
-    const command = `${tokenPrefix}${baseCommand}`;
-    return await withRetry(() => this.executor.exec(command, process.cwd()));
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/rulesets/${rulesetId}`;
+    await this.api.call("DELETE", endpoint, { options });
   }
 }

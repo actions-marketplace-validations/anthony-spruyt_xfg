@@ -1,9 +1,5 @@
 import type { ArrayMergeStrategy } from "./merge.js";
 
-// =============================================================================
-// PR Merge Options Types
-// =============================================================================
-
 export type MergeMode = "manual" | "auto" | "force" | "direct";
 export type MergeStrategy = "merge" | "squash" | "rebase";
 
@@ -12,39 +8,24 @@ export interface PRMergeOptions {
   mergeStrategy?: MergeStrategy;
   deleteBranch?: boolean;
   bypassReason?: string;
+  labels?: string[];
+  branch?: string;
 }
 
-// =============================================================================
-// GitHub Rulesets Types (aligned with GitHub REST API)
-// @see https://docs.github.com/en/rest/repos/rules
-// =============================================================================
-
-/** Ruleset target type */
 export type RulesetTarget = "branch" | "tag";
 
-/** Ruleset enforcement level */
 export type RulesetEnforcement = "active" | "disabled" | "evaluate";
 
-/** Bypass actor type */
 export type BypassActorType = "Team" | "User" | "Integration";
 
-/** Bypass mode - always bypass or only for PRs */
 export type BypassMode = "always" | "pull_request";
 
-/** Pattern operator for pattern-based rules */
-export type PatternOperator =
-  | "starts_with"
-  | "ends_with"
-  | "contains"
-  | "regex";
+type PatternOperator = "starts_with" | "ends_with" | "contains" | "regex";
 
-/** Allowed merge methods */
 export type MergeMethod = "merge" | "squash" | "rebase";
 
-/** Code scanning alerts threshold */
 export type AlertsThreshold = "none" | "errors" | "errors_and_warnings" | "all";
 
-/** Security alerts threshold */
 export type SecurityAlertsThreshold =
   | "none"
   | "critical"
@@ -52,21 +33,13 @@ export type SecurityAlertsThreshold =
   | "medium_or_higher"
   | "all";
 
-// =============================================================================
-// Bypass Actors
-// =============================================================================
-
 export interface BypassActor {
   actorId: number;
   actorType: BypassActorType;
   bypassMode?: BypassMode;
 }
 
-// =============================================================================
-// Conditions
-// =============================================================================
-
-export interface RefNameCondition {
+interface RefNameCondition {
   include?: string[];
   exclude?: string[];
 }
@@ -74,10 +47,6 @@ export interface RefNameCondition {
 export interface RulesetConditions {
   refName?: RefNameCondition;
 }
-
-// =============================================================================
-// Rule Parameters
-// =============================================================================
 
 /** Status check in required_status_checks rule */
 export interface StatusCheckConfig {
@@ -103,16 +72,12 @@ export interface CodeScanningTool {
 }
 
 /** Workflow configuration */
-export interface WorkflowConfig {
+interface WorkflowConfig {
   path: string;
   repositoryId: number;
   ref?: string;
   sha?: string;
 }
-
-// =============================================================================
-// Rule Types (discriminated union)
-// =============================================================================
 
 export interface PullRequestRuleParameters {
   requiredApprovingReviewCount?: number;
@@ -124,53 +89,53 @@ export interface PullRequestRuleParameters {
   requiredReviewers?: RequiredReviewer[];
 }
 
-export interface RequiredStatusChecksParameters {
+interface RequiredStatusChecksParameters {
   strictRequiredStatusChecksPolicy?: boolean;
   doNotEnforceOnCreate?: boolean;
   requiredStatusChecks?: StatusCheckConfig[];
 }
 
-export interface UpdateRuleParameters {
+interface UpdateRuleParameters {
   updateAllowsFetchAndMerge?: boolean;
 }
 
-export interface RequiredDeploymentsParameters {
+interface RequiredDeploymentsParameters {
   requiredDeploymentEnvironments?: string[];
 }
 
-export interface CodeScanningParameters {
+interface CodeScanningParameters {
   codeScanningTools?: CodeScanningTool[];
 }
 
-export interface CodeQualityParameters {
+interface CodeQualityParameters {
   severity?: "errors" | "errors_and_warnings" | "all";
 }
 
-export interface WorkflowsParameters {
+interface WorkflowsParameters {
   doNotEnforceOnCreate?: boolean;
   workflows?: WorkflowConfig[];
 }
 
-export interface PatternRuleParameters {
+interface PatternRuleParameters {
   name?: string;
   negate?: boolean;
   operator: PatternOperator;
   pattern: string;
 }
 
-export interface FilePathRestrictionParameters {
+interface FilePathRestrictionParameters {
   restrictedFilePaths?: string[];
 }
 
-export interface FileExtensionRestrictionParameters {
+interface FileExtensionRestrictionParameters {
   restrictedFileExtensions?: string[];
 }
 
-export interface MaxFilePathLengthParameters {
+interface MaxFilePathLengthParameters {
   maxFilePathLength?: number;
 }
 
-export interface MaxFileSizeParameters {
+interface MaxFileSizeParameters {
   maxFileSize?: number;
 }
 
@@ -275,7 +240,6 @@ export interface MaxFileSizeRule {
   parameters?: MaxFileSizeParameters;
 }
 
-/** Union of all rule types */
 export type RulesetRule =
   | PullRequestRule
   | RequiredStatusChecksRule
@@ -299,10 +263,6 @@ export type RulesetRule =
   | MaxFilePathLengthRule
   | MaxFileSizeRule;
 
-// =============================================================================
-// Ruleset Configuration
-// =============================================================================
-
 /**
  * GitHub Ruleset configuration.
  * @see https://docs.github.com/en/rest/repos/rules
@@ -324,7 +284,7 @@ export interface Ruleset {
  * Maps Ruleset config keys (camelCase) to GitHub API keys (snake_case).
  * TypeScript enforces this stays in sync with the Ruleset interface.
  */
-export const RULESET_FIELD_MAP: Record<keyof Ruleset, string> = {
+const RULESET_FIELD_MAP: Record<keyof Ruleset, string> = {
   target: "target",
   enforcement: "enforcement",
   bypassActors: "bypass_actors",
@@ -339,10 +299,6 @@ export const RULESET_FIELD_MAP: Record<keyof Ruleset, string> = {
 export const RULESET_COMPARABLE_FIELDS = new Set(
   Object.values(RULESET_FIELD_MAP)
 );
-
-// =============================================================================
-// GitHub Repository Settings Types
-// =============================================================================
 
 /** Squash merge commit title format */
 export type SquashMergeCommitTitle = "PR_TITLE" | "COMMIT_OR_PR_TITLE";
@@ -398,21 +354,55 @@ export interface GitHubRepoSettings {
   privateVulnerabilityReporting?: boolean;
 }
 
-// =============================================================================
-// Settings
-// =============================================================================
+/**
+ * GitHub label configuration.
+ * @see https://docs.github.com/en/rest/issues/labels
+ */
+export interface Label {
+  /** Hex color code (with or without #). Stripped on normalization. */
+  color: string;
+  /** Label description (max 100 characters) */
+  description?: string;
+  /** Rename target. Maps to GitHub API's new_name field. */
+  new_name?: string;
+}
+
+export type CodeScanningState = "configured" | "not-configured";
+export type CodeScanningQuerySuite = "default" | "extended";
+export type CodeScanningLanguage =
+  | "actions"
+  | "c-cpp"
+  | "csharp"
+  | "go"
+  | "java-kotlin"
+  | "javascript-typescript"
+  | "python"
+  | "ruby"
+  | "swift";
+
+export interface CodeScanningSettings {
+  state: CodeScanningState;
+  querySuite?: CodeScanningQuerySuite;
+  languages?: CodeScanningLanguage[];
+}
+
+export interface SecretConfig {
+  env: string;
+}
 
 export interface RepoSettings {
   /** GitHub rulesets keyed by name */
   rulesets?: Record<string, Ruleset>;
   /** GitHub repository settings */
   repo?: GitHubRepoSettings;
+  /** GitHub labels keyed by name */
+  labels?: Record<string, Label>;
+  /** GitHub code scanning default setup */
+  codeScanning?: CodeScanningSettings;
+  /** GitHub Actions variables keyed by name */
+  variables?: Record<string, string> & { deleteOrphaned?: boolean };
   deleteOrphaned?: boolean;
 }
-
-// =============================================================================
-// Raw Config Types (as parsed from YAML)
-// =============================================================================
 
 // Content can be object (JSON/YAML), string (text), or string[] (text lines)
 export type ContentValue = Record<string, unknown> | string | string[];
@@ -443,10 +433,64 @@ export interface RawRepoFileOverride {
   deleteOrphaned?: boolean;
 }
 
-// Raw settings (before normalization)
+// Group configuration (shared config layer between root and per-repo)
+// Groups need the same file override capabilities as repos: file: false to remove,
+// inherit: false to discard accumulated files. So files uses the repo-style type.
+// Groups need inherit: false support on settings sub-sections (rulesets, labels),
+// so settings uses RawRepoSettings (which has inherit on rulesets/labels).
+export interface RawGroupConfig {
+  extends?: string | string[];
+  files?: Record<string, RawFileConfig | RawRepoFileOverride | false> & {
+    inherit?: boolean;
+  };
+  prOptions?: PRMergeOptions;
+  settings?: RawRepoSettings;
+}
+
+/** Condition for conditional group activation */
+export interface RawConditionalGroupWhen {
+  /** All listed groups must be present in the repo's effective group set */
+  allOf?: string[];
+  /** At least one listed group must be present */
+  anyOf?: string[];
+  /** None of the listed groups may be present */
+  noneOf?: string[];
+}
+
+/** Conditional group: activates based on which groups a repo has */
+export interface RawConditionalGroupConfig {
+  /** Condition that determines when this group activates */
+  when: RawConditionalGroupWhen;
+  /** File definitions or overrides (same capabilities as regular groups) */
+  files?: Record<string, RawFileConfig | RawRepoFileOverride | false> & {
+    inherit?: boolean;
+  };
+  /** PR merge options */
+  prOptions?: PRMergeOptions;
+  /** Repository settings (rulesets, labels, repo settings) */
+  settings?: RawRepoSettings;
+}
+
+// Root-level settings (before normalization) - inherit not valid here
+export interface RawRootSettings {
+  rulesets?: Record<string, Ruleset | false>;
+  repo?: GitHubRepoSettings | false;
+  labels?: Record<string, Label | false>;
+  codeScanning?: CodeScanningSettings | false;
+  variables?: Record<string, string | false> & { deleteOrphaned?: boolean };
+  deleteOrphaned?: boolean;
+}
+
+// Per-repo settings (before normalization) - inherit controls whether root settings are inherited
 export interface RawRepoSettings {
   rulesets?: Record<string, Ruleset | false> & { inherit?: boolean };
   repo?: GitHubRepoSettings | false;
+  labels?: Record<string, Label | false> & { inherit?: boolean };
+  codeScanning?: CodeScanningSettings | false;
+  variables?: Record<string, string | false> & {
+    inherit?: boolean;
+    deleteOrphaned?: boolean;
+  };
   deleteOrphaned?: boolean;
 }
 
@@ -456,6 +500,7 @@ export interface RawRepoSettings {
 export interface RawRepoConfig {
   git: string | string[];
   files?: Record<string, RawRepoFileOverride | false> & { inherit?: boolean };
+  groups?: string[];
   prOptions?: PRMergeOptions;
   settings?: RawRepoSettings;
   /** Fork upstream repo if target doesn't exist */
@@ -468,17 +513,18 @@ export interface RawRepoConfig {
 export interface RawConfig {
   id: string;
   files?: Record<string, RawFileConfig>;
+  groups?: Record<string, RawGroupConfig>;
+  conditionalGroups?: RawConditionalGroupConfig[];
   repos: RawRepoConfig[];
   prOptions?: PRMergeOptions;
   prTemplate?: string;
   githubHosts?: string[];
   deleteOrphaned?: boolean;
-  settings?: RawRepoSettings;
+  settings?: RawRootSettings;
+  secrets?: Record<string, SecretConfig | boolean> & {
+    deleteOrphaned?: boolean;
+  };
 }
-
-// =============================================================================
-// Normalized Config Types (output)
-// =============================================================================
 
 // File content for a single file in a repo
 export interface FileContent {
@@ -513,4 +559,7 @@ export interface Config {
   githubHosts?: string[];
   deleteOrphaned?: boolean;
   settings?: RepoSettings;
+  secrets?: Record<string, SecretConfig | boolean> & {
+    deleteOrphaned?: boolean;
+  };
 }

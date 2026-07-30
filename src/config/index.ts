@@ -1,120 +1,58 @@
 // Re-export all types
 export type {
   // PR Merge Options
+  PRMergeOptions,
   MergeMode,
   MergeStrategy,
-  PRMergeOptions,
   // Rulesets
-  RulesetTarget,
-  RulesetEnforcement,
-  BypassActorType,
-  BypassMode,
-  PatternOperator,
-  MergeMethod,
-  AlertsThreshold,
-  SecurityAlertsThreshold,
   BypassActor,
-  RefNameCondition,
-  RulesetConditions,
   StatusCheckConfig,
-  RequiredReviewer,
   CodeScanningTool,
-  WorkflowConfig,
   PullRequestRuleParameters,
-  RequiredStatusChecksParameters,
-  UpdateRuleParameters,
-  RequiredDeploymentsParameters,
-  CodeScanningParameters,
-  CodeQualityParameters,
-  WorkflowsParameters,
-  PatternRuleParameters,
-  FilePathRestrictionParameters,
-  FileExtensionRestrictionParameters,
-  MaxFilePathLengthParameters,
-  MaxFileSizeParameters,
-  PullRequestRule,
-  RequiredStatusChecksRule,
-  RequiredSignaturesRule,
-  RequiredLinearHistoryRule,
-  NonFastForwardRule,
-  CreationRule,
-  UpdateRule,
-  DeletionRule,
-  RequiredDeploymentsRule,
-  CodeScanningRule,
-  CodeQualityRule,
-  WorkflowsRule,
-  CommitAuthorEmailPatternRule,
-  CommitMessagePatternRule,
-  CommitterEmailPatternRule,
-  BranchNamePatternRule,
-  TagNamePatternRule,
-  FilePathRestrictionRule,
-  FileExtensionRestrictionRule,
-  MaxFilePathLengthRule,
-  MaxFileSizeRule,
   RulesetRule,
   Ruleset,
   // Repo Settings
+  GitHubRepoSettings,
+  RepoVisibility,
   SquashMergeCommitTitle,
   SquashMergeCommitMessage,
   MergeCommitTitle,
   MergeCommitMessage,
-  RepoVisibility,
-  GitHubRepoSettings,
+  // Labels
+  Label,
+  // Code Scanning
+  CodeScanningSettings,
+  CodeScanningState,
+  CodeScanningQuerySuite,
+  CodeScanningLanguage,
   RepoSettings,
   // Raw Config
-  ContentValue,
   RawFileConfig,
   RawRepoFileOverride,
+  RawGroupConfig,
+  SecretConfig,
+  RawRootSettings,
   RawRepoSettings,
   RawRepoConfig,
   RawConfig,
+  RawConditionalGroupWhen,
+  RawConditionalGroupConfig,
   // Normalized Config
-  FileContent,
   RepoConfig,
   Config,
+  // File content
+  FileContent,
+  ContentValue,
 } from "./types.js";
 
 // Re-export values (non-type exports)
-export { RULESET_FIELD_MAP, RULESET_COMPARABLE_FIELDS } from "./types.js";
+export { RULESET_COMPARABLE_FIELDS } from "./types.js";
 
 // Re-export loading functions
 export { loadRawConfig, loadConfig, normalizeConfig } from "./loader.js";
 
 // Config formatting
-export {
-  convertContentToString,
-  detectOutputFormat,
-  type OutputFormat,
-  type ConvertOptions,
-} from "./formatter.js";
+export { convertContentToString } from "./formatter.js";
 
-// File reference resolution
-export {
-  isFileReference,
-  resolveFileReference,
-  type FileReferenceOptions,
-} from "./file-reference-resolver.js";
-
-// Deep merge utilities
-export {
-  arrayMergeStrategies,
-  deepMerge,
-  stripMergeDirectives,
-  createMergeContext,
-  isTextContent,
-  mergeTextContent,
-  type ArrayMergeStrategy,
-  type ArrayMergeHandler,
-  type MergeContext,
-} from "./merge.js";
-
-// Validation
-export {
-  validateRawConfig,
-  validateSettings,
-  validateForSync,
-  validateForSettings,
-  hasActionableSettings,
-} from "./validator.js";
+// Config validation
+export { validateForSync, validateSecretsConfig } from "./validator.js";

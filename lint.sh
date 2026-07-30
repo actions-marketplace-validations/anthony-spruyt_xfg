@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2193,SC2157 # $$ is xfg template escaping, becomes $ after processing
+# shellcheck disable=SC1091 # lint-config.sh path resolved at runtime
 set -euo pipefail
 
 # This file is automatically updated - do not modify directly
@@ -17,16 +17,22 @@ source "$REPO_ROOT/lint-config.sh"
 
 if [[ "${1:-}" == "--ci" ]]; then
   # CI mode
-  # Skip bot commits if configured
-  if [[ "$SKIP_BOT_COMMITS" == "true" && ("${GITHUB_ACTOR:-}" == "renovate[bot]" || "${GITHUB_ACTOR:-}" == "dependabot[bot]") ]]; then
-    echo "::notice::Skipping lint for bot commit"
-    exit 0
+  # Skip bot-authored commits if configured (check commit author, not workflow actor)
+  if [[ "$SKIP_BOT_COMMITS" == "true" ]]; then
+    commit_author="$(git log -1 --format='%an' HEAD 2>/dev/null || true)"
+    if [[ "$commit_author" == "renovate[bot]" || "$commit_author" == "dependabot[bot]" ]]; then
+      echo "::notice::Skipping lint for bot commit (author: $commit_author)"
+      exit 0
+    fi
   fi
 
   # Build docker run arguments
   docker_args=(
     -e MEGALINTER_FLAVOR="$MEGALINTER_FLAVOR"
     -e SARIF_REPORTER=true
+    -e LOG_LEVEL=ERROR
+    -e PRINT_ALPACA=false
+    -e SHOW_SKIPPED_LINTERS=false
     -e GITHUB_TOKEN="${GITHUB_TOKEN:-}"
     -e VALIDATE_ALL_CODEBASE="${VALIDATE_ALL_CODEBASE:-}"
     -e DEFAULT_WORKSPACE=/tmp/lint
@@ -46,13 +52,30 @@ if [[ "${1:-}" == "--ci" ]]; then
 
   docker run "${docker_args[@]}" "$MEGALINTER_IMAGE"
 else
-  # Local mode - with fixes and user permissions
-  rm -rf "$REPO_ROOT/.output"
+  # Local mode - with fixes and user permissions.
+  # .output may be root-owned from an earlier rootful-podman run, so fall
+  # back to sudo if a plain rm is rejected.
+  rm -rf "$REPO_ROOT/.output" 2>/dev/null || sudo -n rm -rf "$REPO_ROOT/.output"
   mkdir "$REPO_ROOT/.output"
 
-  docker run \
-    -a STDOUT \
-    -a STDERR \
+  LINT_EXIT_CODE=0
+
+  # Inside a WSL2 devcontainer (nested userns), rootless podman's newuidmap
+  # fails because the outer namespace did not delegate subuid ranges. Use
+  # `sudo podman` with --network=host so no slirp4netns / subuid setup is
+  # required. The container still runs linters as the invoking user via -u.
+  if [[ "$(id -u)" != "0" ]] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    runner=(sudo -n podman)
+    network_arg=(--network=host --uts=host)
+  else
+    runner=(docker)
+    network_arg=()
+  fi
+
+  echo "Running MegaLinter (output suppressed)..."
+
+  "${runner[@]}" run \
+    "${network_arg[@]}" \
     -u "$(id -u):$(id -g)" \
     -w /tmp/lint \
     -e HOME=/tmp \
@@ -63,14 +86,22 @@ else
     -e REPORT_OUTPUT_FOLDER="/tmp/lint/.output" \
     -v "$REPO_ROOT:/tmp/lint:rw" \
     --rm \
-    "$MEGALINTER_IMAGE"
-
-  LINT_EXIT_CODE=$?
+    "$MEGALINTER_IMAGE" >/dev/null 2>&1 ||
+    LINT_EXIT_CODE=$?
 
   # Copy fixed files back to workspace
   if compgen -G "$REPO_ROOT/.output/updated_sources/*" >/dev/null; then
     cp -r "$REPO_ROOT/.output/updated_sources"/* "$REPO_ROOT/"
   fi
 
-  exit $LINT_EXIT_CODE
+  if [[ "$LINT_EXIT_CODE" -eq 0 ]]; then
+    echo "MegaLinter passed. Results in .output/"
+  else
+    echo "MegaLinter failed (exit code $LINT_EXIT_CODE). Check .output/ for details:"
+    echo "  .output/megalinter.log        - Full run log"
+    echo "  .output/linters_logs/          - Per-linter logs"
+    echo "  .output/updated_sources/       - Auto-fixed files (already copied back)"
+  fi
+
+  exit "$LINT_EXIT_CODE"
 fi

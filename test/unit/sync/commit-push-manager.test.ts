@@ -9,8 +9,9 @@ import {
   createMockLogger,
   createMockExecutor,
 } from "../../mocks/index.js";
-import type { GitHubRepoInfo } from "../../../src/shared/repo-detector.js";
+import type { GitHubRepoInfo } from "../../../src/repo/index.js";
 import type { FileWriteResult } from "../../../src/sync/types.js";
+import type { FileChange } from "../../../src/vcs/types.js";
 
 const testDir = join(tmpdir(), "commit-push-manager-test-" + Date.now());
 
@@ -36,7 +37,7 @@ describe("CommitPushManager", () => {
 
   describe("commitAndPush", () => {
     test("logs actions in dry-run mode without committing", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({});
+      const { gitOps } = createMockAuthenticatedGitOps({});
       const { mock: mockLogger, messages } = createMockLogger();
       const { mock: mockExecutor } = createMockExecutor({});
 
@@ -48,21 +49,19 @@ describe("CommitPushManager", () => {
         ],
       ]);
 
-      const result = await manager.commitAndPush(
-        {
-          repoInfo: mockRepoInfo,
-          gitOps: mockGitOps,
-          workDir,
-          fileChanges,
-          commitMessage: "chore: sync config",
-          pushBranch: "chore/sync-config",
-          isDirectMode: false,
-          dryRun: true,
-          retries: 3,
-          executor: mockExecutor,
-        },
-        "test/repo"
-      );
+      const result = await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: true,
+        retries: 3,
+        executor: mockExecutor,
+      });
 
       assert.equal(result.success, true);
       assert.ok(messages.some((msg) => msg.includes("Would commit")));
@@ -70,7 +69,7 @@ describe("CommitPushManager", () => {
     });
 
     test("returns skipped when no staged changes", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({
+      const { gitOps } = createMockAuthenticatedGitOps({
         hasStagedChanges: false,
       });
       const { mock: mockLogger, messages } = createMockLogger();
@@ -84,21 +83,19 @@ describe("CommitPushManager", () => {
         ],
       ]);
 
-      const result = await manager.commitAndPush(
-        {
-          repoInfo: mockRepoInfo,
-          gitOps: mockGitOps,
-          workDir,
-          fileChanges,
-          commitMessage: "chore: sync config",
-          pushBranch: "chore/sync-config",
-          isDirectMode: false,
-          dryRun: false,
-          retries: 3,
-          executor: mockExecutor,
-        },
-        "test/repo"
-      );
+      const result = await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: false,
+        retries: 3,
+        executor: mockExecutor,
+      });
 
       assert.equal(result.success, true);
       assert.equal(result.skipped, true);
@@ -106,7 +103,7 @@ describe("CommitPushManager", () => {
     });
 
     test("returns error result for branch protection rejection in direct mode", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({
+      const { gitOps } = createMockAuthenticatedGitOps({
         hasStagedChanges: true,
       });
       const { mock: mockLogger } = createMockLogger();
@@ -126,27 +123,25 @@ describe("CommitPushManager", () => {
       ]);
 
       // This test verifies dry-run path works (commit strategy complexity avoided)
-      const result = await manager.commitAndPush(
-        {
-          repoInfo: mockRepoInfo,
-          gitOps: mockGitOps,
-          workDir,
-          fileChanges,
-          commitMessage: "chore: sync config",
-          pushBranch: "main",
-          isDirectMode: true,
-          dryRun: true, // Use dry-run to avoid commit strategy complexity
-          retries: 3,
-          executor: mockExecutor,
-        },
-        "test/repo"
-      );
+      const result = await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "main",
+        baseBranch: "main",
+        isDirectMode: true,
+        dryRun: true, // Use dry-run to avoid commit strategy complexity
+        retries: 3,
+        executor: mockExecutor,
+      });
 
       assert.equal(result.success, true);
     });
 
     test("filters out skipped files from commit", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({
+      const { gitOps } = createMockAuthenticatedGitOps({
         hasStagedChanges: true,
       });
       const { mock: mockLogger } = createMockLogger();
@@ -168,31 +163,147 @@ describe("CommitPushManager", () => {
       ]);
 
       // Test dry-run to verify filtering logic
-      const result = await manager.commitAndPush(
-        {
-          repoInfo: mockRepoInfo,
-          gitOps: mockGitOps,
-          workDir,
-          fileChanges,
-          commitMessage: "chore: sync config",
-          pushBranch: "chore/sync-config",
-          isDirectMode: false,
-          dryRun: true,
-          retries: 3,
-          executor: mockExecutor,
-        },
-        "test/repo"
-      );
+      const result = await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: true,
+        retries: 3,
+        executor: mockExecutor,
+      });
 
       assert.equal(result.success, true);
     });
 
-    test("calls git add -A when not in dry-run mode", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({
-        hasStagedChanges: false, // Return false so we skip commit
+    test("passes mode through to FileChange array", async () => {
+      const { gitOps } = createMockAuthenticatedGitOps({
+        hasStagedChanges: true,
       });
       const { mock: mockLogger } = createMockLogger();
-      const { mock: mockExecutor, calls } = createMockExecutor({});
+      const { mock: mockExecutor } = createMockExecutor({});
+
+      let capturedFileChanges: FileChange[] = [];
+      const mockStrategy = {
+        async commit(options: { fileChanges: FileChange[] }) {
+          capturedFileChanges = options.fileChanges;
+          return { sha: "abc123", verified: true, pushed: true };
+        },
+      };
+
+      const manager = new CommitPushManager(mockLogger, () => mockStrategy);
+      const fileChanges = new Map<string, FileWriteResult>([
+        [
+          "deploy.sh",
+          {
+            fileName: "deploy.sh",
+            content: "#!/bin/bash",
+            action: "create" as const,
+            mode: "100755" as const,
+          },
+        ],
+        [
+          "config.json",
+          {
+            fileName: "config.json",
+            content: "{}",
+            action: "create" as const,
+          },
+        ],
+      ]);
+
+      await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: false,
+        retries: 3,
+        executor: mockExecutor,
+      });
+
+      const shEntry = capturedFileChanges.find((fc) => fc.path === "deploy.sh");
+      assert.equal(shEntry?.mode, "100755");
+
+      const jsonEntry = capturedFileChanges.find(
+        (fc) => fc.path === "config.json"
+      );
+      assert.equal(jsonEntry?.mode, undefined);
+    });
+
+    test("passes modeOnly flag through to FileChange array", async () => {
+      const { gitOps } = createMockAuthenticatedGitOps({
+        hasStagedChanges: true,
+      });
+      const { mock: mockLogger } = createMockLogger();
+      const { mock: mockExecutor } = createMockExecutor({});
+
+      let capturedFileChanges: FileChange[] = [];
+      const mockStrategy = {
+        async commit(options: { fileChanges: FileChange[] }) {
+          capturedFileChanges = options.fileChanges;
+          return { sha: "abc123", verified: true, pushed: true };
+        },
+      };
+
+      const manager = new CommitPushManager(mockLogger, () => mockStrategy);
+      const fileChanges = new Map<string, FileWriteResult>([
+        [
+          "scripts/run",
+          {
+            fileName: "scripts/run",
+            content: null,
+            action: "update" as const,
+            mode: "100755" as const,
+            modeOnly: true as const,
+          },
+        ],
+      ]);
+
+      await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: false,
+        retries: 3,
+        executor: mockExecutor,
+      });
+
+      const entry = capturedFileChanges.find((fc) => fc.path === "scripts/run");
+      assert.equal(entry?.modeOnly, true);
+      assert.equal(entry?.mode, "100755");
+    });
+
+    test("calls stageAll before hasStagedChanges in non-dry-run mode", async () => {
+      const callOrder: string[] = [];
+      const { gitOps } = createMockAuthenticatedGitOps({
+        hasStagedChanges: false, // Return false so we skip commit
+      });
+      const originalStageAll = gitOps.stageAll.bind(gitOps);
+      gitOps.stageAll = async () => {
+        callOrder.push("stageAll");
+        return originalStageAll();
+      };
+      const originalHasStagedChanges = gitOps.hasStagedChanges.bind(gitOps);
+      gitOps.hasStagedChanges = async () => {
+        callOrder.push("hasStagedChanges");
+        return originalHasStagedChanges();
+      };
+      const { mock: mockLogger } = createMockLogger();
+      const { mock: mockExecutor } = createMockExecutor({});
 
       const manager = new CommitPushManager(mockLogger);
       const fileChanges = new Map<string, FileWriteResult>([
@@ -202,25 +313,63 @@ describe("CommitPushManager", () => {
         ],
       ]);
 
-      await manager.commitAndPush(
-        {
-          repoInfo: mockRepoInfo,
-          gitOps: mockGitOps,
-          workDir,
-          fileChanges,
-          commitMessage: "chore: sync config",
-          pushBranch: "chore/sync-config",
-          isDirectMode: false,
-          dryRun: false,
-          retries: 3,
-          executor: mockExecutor,
-        },
-        "test/repo"
-      );
+      await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: false,
+        retries: 3,
+        executor: mockExecutor,
+      });
 
-      // Verify git add -A was called
-      assert.ok(calls.some((c) => c.command === "git add -A"));
-      assert.ok(calls.some((c) => c.cwd === workDir));
+      assert.deepStrictEqual(
+        callOrder,
+        ["stageAll", "hasStagedChanges"],
+        "stageAll must be called before hasStagedChanges"
+      );
+    });
+
+    test("does not call stageAll in dry-run mode", async () => {
+      let stageAllCalled = false;
+      const { gitOps } = createMockAuthenticatedGitOps({});
+      gitOps.stageAll = async () => {
+        stageAllCalled = true;
+      };
+      const { mock: mockLogger } = createMockLogger();
+      const { mock: mockExecutor } = createMockExecutor({});
+
+      const manager = new CommitPushManager(mockLogger);
+      const fileChanges = new Map<string, FileWriteResult>([
+        [
+          "config.json",
+          { fileName: "config.json", content: "{}", action: "create" },
+        ],
+      ]);
+
+      await manager.commitAndPush({
+        repoInfo: mockRepoInfo,
+        gitOps,
+        workDir,
+        fileChanges,
+        commitMessage: "chore: sync config",
+        pushBranch: "chore/sync-config",
+        baseBranch: "main",
+        isDirectMode: false,
+        dryRun: true,
+        retries: 3,
+        executor: mockExecutor,
+      });
+
+      assert.equal(
+        stageAllCalled,
+        false,
+        "stageAll should not be called in dry-run mode"
+      );
     });
   });
 });

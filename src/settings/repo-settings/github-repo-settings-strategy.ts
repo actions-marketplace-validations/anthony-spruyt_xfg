@@ -1,27 +1,15 @@
+import type { ICommandExecutor } from "../../shared/command-executor.js";
 import {
-  ICommandExecutor,
-  defaultExecutor,
-} from "../../shared/command-executor.js";
-import {
-  isGitHubRepo,
-  GitHubRepoInfo,
-  RepoInfo,
-} from "../../shared/repo-detector.js";
-import { escapeShellArg } from "../../shared/shell-utils.js";
-import { withRetry } from "../../shared/retry-utils.js";
+  assertGitHubRepo,
+  type GitHubRepoInfo,
+  type RepoInfo,
+} from "../../repo/index.js";
+import { GhApiClient, type GhApiOptions } from "../../shared/gh-api-utils.js";
+import { isHttp404Error } from "../../shared/gh-token-utils.js";
+import { parseApiJson } from "../../shared/json-utils.js";
 import type { GitHubRepoSettings } from "../../config/index.js";
-import type {
-  IRepoSettingsStrategy,
-  RepoSettingsStrategyOptions,
-  CurrentRepoSettings,
-} from "./types.js";
-
-/**
- * Converts camelCase to snake_case.
- */
-function camelToSnake(str: string): string {
-  return str.replace(/([A-Z])/g, "_$1").toLowerCase();
-}
+import type { IRepoSettingsStrategy, CurrentRepoSettings } from "./types.js";
+import { camelToSnake } from "../../shared/string-utils.js";
 
 /**
  * Converts GitHubRepoSettings (camelCase) to GitHub API format (snake_case).
@@ -86,58 +74,58 @@ function configToGitHubPayload(
   return payload;
 }
 
-/**
- * GitHub Repository Settings Strategy.
- * Manages repository settings via GitHub REST API using `gh api` CLI.
- * Note: Uses exec via ICommandExecutor for gh CLI integration, consistent
- * with other strategies in this codebase. Inputs are escaped via escapeShellArg.
- */
-export class GitHubRepoSettingsStrategy implements IRepoSettingsStrategy {
-  private executor: ICommandExecutor;
+interface GitHubRepoSettingsStrategyOptions {
+  retries?: number;
+  cwd: string;
+}
 
-  constructor(executor?: ICommandExecutor) {
-    this.executor = executor ?? defaultExecutor;
+export class GitHubRepoSettingsStrategy implements IRepoSettingsStrategy {
+  private api: GhApiClient;
+
+  constructor(
+    executor: ICommandExecutor,
+    options: GitHubRepoSettingsStrategyOptions
+  ) {
+    this.api = new GhApiClient(executor, options.retries ?? 3, options.cwd);
   }
 
-  async getSettings(
+  async get(
     repoInfo: RepoInfo,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<CurrentRepoSettings> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Repo Settings strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}`;
-    const result = await this.ghApi("GET", endpoint, undefined, options);
-    const parsed = JSON.parse(result);
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}`;
+    const result = await this.api.call("GET", endpoint, { options });
+    const parsed = parseApiJson<
+      CurrentRepoSettings & { owner?: { type?: "User" | "Organization" } }
+    >(result, "repo settings response");
     const settings = parsed as CurrentRepoSettings;
 
     // Extract owner type from nested API response
     settings.owner_type = parsed.owner?.type;
 
-    // Fetch security settings from separate endpoints
     settings.vulnerability_alerts = await this.getVulnerabilityAlerts(
-      github,
+      repoInfo,
       options
     );
     // Pass vulnerability_alerts state - automated security fixes requires it enabled
     settings.automated_security_fixes = await this.getAutomatedSecurityFixes(
-      github,
-      options,
-      settings.vulnerability_alerts
+      repoInfo,
+      options
     );
     settings.private_vulnerability_reporting =
-      await this.getPrivateVulnerabilityReporting(github, options);
+      await this.getPrivateVulnerabilityReporting(repoInfo, options);
 
     return settings;
   }
 
-  async updateSettings(
+  async update(
     repoInfo: RepoInfo,
     settings: GitHubRepoSettings,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<void> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Repo Settings strategy");
 
     const payload = configToGitHubPayload(settings);
 
@@ -146,85 +134,101 @@ export class GitHubRepoSettingsStrategy implements IRepoSettingsStrategy {
       return;
     }
 
-    const endpoint = `/repos/${github.owner}/${github.repo}`;
-    await this.ghApi("PATCH", endpoint, payload, options);
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}`;
+    await this.api.call("PATCH", endpoint, { payload, options });
   }
 
-  async setVulnerabilityAlerts(
+  async updateVulnerabilityAlerts(
     repoInfo: RepoInfo,
     enable: boolean,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<void> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Repo Settings strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/vulnerability-alerts`;
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/vulnerability-alerts`;
     const method = enable ? "PUT" : "DELETE";
-    await this.ghApi(method, endpoint, undefined, options);
+    await this.api.call(method, endpoint, { options });
   }
 
-  async setAutomatedSecurityFixes(
+  async updateAutomatedSecurityFixes(
     repoInfo: RepoInfo,
     enable: boolean,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<void> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Repo Settings strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/automated-security-fixes`;
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/automated-security-fixes`;
     const method = enable ? "PUT" : "DELETE";
-    await this.ghApi(method, endpoint, undefined, options);
+    await this.api.call(method, endpoint, { options });
   }
 
-  async setPrivateVulnerabilityReporting(
+  async updatePrivateVulnerabilityReporting(
     repoInfo: RepoInfo,
     enable: boolean,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<void> {
-    this.validateGitHub(repoInfo);
-    const github = repoInfo as GitHubRepoInfo;
+    assertGitHubRepo(repoInfo, "GitHub Repo Settings strategy");
 
-    const endpoint = `/repos/${github.owner}/${github.repo}/private-vulnerability-reporting`;
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/private-vulnerability-reporting`;
     const method = enable ? "PUT" : "DELETE";
-    await this.ghApi(method, endpoint, undefined, options);
+    await this.api.call(method, endpoint, { options });
+  }
+
+  async branchExists(
+    repoInfo: RepoInfo,
+    branch: string,
+    options?: GhApiOptions
+  ): Promise<boolean> {
+    assertGitHubRepo(repoInfo, "GitHub Repo Settings strategy");
+
+    const endpoint = `/repos/${repoInfo.owner}/${repoInfo.repo}/branches/${encodeURIComponent(branch)}`;
+    try {
+      await this.api.call("GET", endpoint, { options });
+      return true;
+    } catch (error) {
+      if (isHttp404Error(error)) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   private async getVulnerabilityAlerts(
     github: GitHubRepoInfo,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<boolean> {
     const endpoint = `/repos/${github.owner}/${github.repo}/vulnerability-alerts`;
     try {
-      await this.ghApi("GET", endpoint, undefined, options);
+      await this.api.call("GET", endpoint, { options });
       return true; // 204 = enabled
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("HTTP 404")) {
+      if (isHttp404Error(error)) {
         return false; // 404 = disabled
       }
-      throw error; // Re-throw other errors
+      throw error;
     }
   }
 
   private async getAutomatedSecurityFixes(
     github: GitHubRepoInfo,
-    options?: RepoSettingsStrategyOptions,
-    _vulnerabilityAlertsEnabled?: boolean
+    options?: GhApiOptions
   ): Promise<boolean> {
     // Note: GitHub returns JSON with {enabled: boolean} for this endpoint
     const endpoint = `/repos/${github.owner}/${github.repo}/automated-security-fixes`;
     try {
-      const result = await this.ghApi("GET", endpoint, undefined, options);
+      const result = await this.api.call("GET", endpoint, { options });
       // Parse JSON response - GitHub returns {"enabled": true/false}
       if (result) {
-        const data = JSON.parse(result);
+        const data = parseApiJson<{ enabled?: boolean }>(
+          result,
+          "automated security fixes response"
+        );
         return data.enabled === true;
       }
       // Empty response (204) means enabled
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("HTTP 404")) {
+      if (isHttp404Error(error)) {
         return false;
       }
       throw error;
@@ -233,64 +237,21 @@ export class GitHubRepoSettingsStrategy implements IRepoSettingsStrategy {
 
   private async getPrivateVulnerabilityReporting(
     github: GitHubRepoInfo,
-    options?: RepoSettingsStrategyOptions
+    options?: GhApiOptions
   ): Promise<boolean> {
     const endpoint = `/repos/${github.owner}/${github.repo}/private-vulnerability-reporting`;
     try {
-      const result = await this.ghApi("GET", endpoint, undefined, options);
-      const data = JSON.parse(result);
+      const result = await this.api.call("GET", endpoint, { options });
+      const data = parseApiJson<{ enabled?: boolean }>(
+        result,
+        "private vulnerability reporting response"
+      );
       return data.enabled === true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("HTTP 404")) {
+      if (isHttp404Error(error)) {
         return false; // 404 = not available (e.g. private repos)
       }
-      throw error; // Re-throw other errors
+      throw error;
     }
-  }
-
-  private validateGitHub(repoInfo: RepoInfo): void {
-    if (!isGitHubRepo(repoInfo)) {
-      throw new Error(
-        `GitHub Repo Settings strategy requires GitHub repositories. Got: ${repoInfo.type}`
-      );
-    }
-  }
-
-  private async ghApi(
-    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
-    endpoint: string,
-    payload?: unknown,
-    options?: RepoSettingsStrategyOptions
-  ): Promise<string> {
-    const args: string[] = ["gh", "api"];
-
-    if (method !== "GET") {
-      args.push("-X", method);
-    }
-
-    if (options?.host && options.host !== "github.com") {
-      args.push("--hostname", escapeShellArg(options.host));
-    }
-
-    args.push(escapeShellArg(endpoint));
-
-    const baseCommand = args.join(" ");
-
-    const tokenPrefix = options?.token
-      ? `GH_TOKEN=${escapeShellArg(options.token)} `
-      : "";
-
-    if (
-      payload &&
-      (method === "POST" || method === "PUT" || method === "PATCH")
-    ) {
-      const payloadJson = JSON.stringify(payload);
-      const command = `echo ${escapeShellArg(payloadJson)} | ${tokenPrefix}${baseCommand} --input -`;
-      return await withRetry(() => this.executor.exec(command, process.cwd()));
-    }
-
-    const command = `${tokenPrefix}${baseCommand}`;
-    return await withRetry(() => this.executor.exec(command, process.cwd()));
   }
 }

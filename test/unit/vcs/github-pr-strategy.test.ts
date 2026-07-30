@@ -1,56 +1,18 @@
 import { describe, test, beforeEach, afterEach } from "node:test";
-import assert from "node:assert";
+import { strict as assert } from "node:assert";
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { GitHubPRStrategy } from "../../../src/vcs/github-pr-strategy.js";
-import { GitHubRepoInfo } from "../../../src/shared/repo-detector.js";
-import { PRStrategyOptions } from "../../../src/vcs/pr-strategy.js";
+import { PRWorkflowExecutor } from "../../../src/vcs/pr-strategy.js";
+import { GitHubRepoInfo } from "../../../src/repo/index.js";
+import type { PRStrategyOptions } from "../../../src/vcs/types.js";
 import {
-  ICommandExecutor,
-  ExecOptions,
-} from "../../../src/shared/command-executor.js";
+  createMockExecutor,
+  type ExecutorMockResult,
+} from "../../mocks/executor.mock.js";
 
-const testDir = join(process.cwd(), "test-github-strategy-tmp");
-
-// Mock executor for testing - implements ICommandExecutor interface
-function createMockExecutor(): ICommandExecutor & {
-  calls: Array<{ command: string; cwd: string; options?: ExecOptions }>;
-  responses: Map<string, string | Error>;
-  reset: () => void;
-} {
-  const calls: Array<{ command: string; cwd: string; options?: ExecOptions }> =
-    [];
-  const responses = new Map<string, string | Error>();
-
-  return {
-    calls,
-    responses,
-    async exec(
-      command: string,
-      cwd: string,
-      options?: ExecOptions
-    ): Promise<string> {
-      calls.push({ command, cwd, options });
-
-      // Check for matching response
-      for (const [pattern, response] of responses) {
-        if (command.includes(pattern)) {
-          if (response instanceof Error) {
-            throw response;
-          }
-          return response;
-        }
-      }
-
-      // Default: return empty string
-      return "";
-    },
-    reset(): void {
-      calls.length = 0;
-      responses.clear();
-    },
-  };
-}
+const testDir = join(tmpdir(), "test-github-strategy-tmp");
 
 describe("GitHubPRStrategy with mock executor", () => {
   const githubRepoInfo: GitHubRepoInfo = {
@@ -61,7 +23,7 @@ describe("GitHubPRStrategy with mock executor", () => {
     host: "github.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
+  let mockExecutor: ExecutorMockResult;
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -77,14 +39,14 @@ describe("GitHubPRStrategy with mock executor", () => {
     }
   });
 
-  describe("checkExistingPR", () => {
+  describe("findExistingPRUrl", () => {
     test("returns PR URL when PR exists", async () => {
       mockExecutor.responses.set(
         "gh pr list",
         "https://github.com/owner/repo/pull/123"
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -95,18 +57,36 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      const result = await strategy.checkExistingPR(options);
+      const result = await strategy.findExistingPRUrl(options);
 
       assert.equal(result, "https://github.com/owner/repo/pull/123");
       assert.equal(mockExecutor.calls.length, 1);
-      assert.ok(mockExecutor.calls[0].command.includes("gh pr list"));
-      assert.ok(mockExecutor.calls[0].command.includes("test-branch"));
+      const listCall = mockExecutor.calls[0];
+      assert.strictEqual(listCall.executable, "gh");
+      assert.ok(listCall.args.includes("pr"));
+      assert.ok(listCall.args.includes("list"));
+      assert.ok(listCall.args.includes("--repo"), "should target correct repo");
+      const repoIdx = listCall.args.indexOf("--repo");
+      assert.strictEqual(
+        listCall.args[repoIdx + 1],
+        "owner/repo",
+        "should target correct repo"
+      );
+      assert.ok(listCall.args.includes("--head"), "should filter by branch");
+      const headIdx = listCall.args.indexOf("--head");
+      assert.strictEqual(
+        listCall.args[headIdx + 1],
+        "test-branch",
+        "should filter by branch"
+      );
+      assert.ok(listCall.args.includes("--json"), "should request url field");
+      assert.ok(listCall.args.includes("--jq"), "should use jq to extract url");
     });
 
     test("returns null when no PR exists", async () => {
       mockExecutor.responses.set("gh pr list", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -117,7 +97,7 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      const result = await strategy.checkExistingPR(options);
+      const result = await strategy.findExistingPRUrl(options);
 
       assert.equal(result, null);
     });
@@ -126,7 +106,7 @@ describe("GitHubPRStrategy with mock executor", () => {
       const authError = new Error("401 Unauthorized - Bad credentials");
       mockExecutor.responses.set("gh pr list", authError);
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -137,14 +117,17 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      await assert.rejects(() => strategy.checkExistingPR(options), /401/);
+      await assert.rejects(
+        () => strategy.findExistingPRUrl(options),
+        /401 Unauthorized/
+      );
     });
 
     test("returns null on transient error", async () => {
       const networkError = new Error("Connection timed out");
       mockExecutor.responses.set("gh pr list", networkError);
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -155,7 +138,28 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      const result = await strategy.checkExistingPR(options);
+      const result = await strategy.findExistingPRUrl(options);
+      assert.equal(result, null);
+    });
+
+    test("returns null and logs debug on transient error with stderr", async () => {
+      const errorWithStderr = Object.assign(new Error("Command failed"), {
+        stderr: "gh: connection refused",
+      });
+      mockExecutor.responses.set("gh pr list", errorWithStderr);
+
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const options: PRStrategyOptions = {
+        repoInfo: githubRepoInfo,
+        title: "Test PR",
+        body: "Test body",
+        branchName: "test-branch",
+        baseBranch: "main",
+        workDir: testDir,
+        retries: 0,
+      };
+
+      const result = await strategy.findExistingPRUrl(options);
       assert.equal(result, null);
     });
   });
@@ -167,7 +171,7 @@ describe("GitHubPRStrategy with mock executor", () => {
         "Creating pull request...\nhttps://github.com/owner/repo/pull/456"
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -183,8 +187,44 @@ describe("GitHubPRStrategy with mock executor", () => {
       assert.equal(result.success, true);
       assert.equal(result.url, "https://github.com/owner/repo/pull/456");
       assert.equal(mockExecutor.calls.length, 1);
-      assert.ok(mockExecutor.calls[0].command.includes("gh pr create"));
-      assert.ok(mockExecutor.calls[0].command.includes("Test PR"));
+      const createCallData = mockExecutor.calls[0];
+      assert.strictEqual(createCallData.executable, "gh");
+      assert.ok(createCallData.args.includes("pr"));
+      assert.ok(createCallData.args.includes("create"));
+      assert.ok(
+        createCallData.args.includes("--title"),
+        "should include PR title"
+      );
+      const titleIdx = createCallData.args.indexOf("--title");
+      assert.strictEqual(
+        createCallData.args[titleIdx + 1],
+        "Test PR",
+        "should include PR title"
+      );
+      assert.ok(
+        createCallData.args.includes("--base"),
+        "should include base branch"
+      );
+      const baseIdx = createCallData.args.indexOf("--base");
+      assert.strictEqual(
+        createCallData.args[baseIdx + 1],
+        "main",
+        "should include base branch"
+      );
+      assert.ok(
+        createCallData.args.includes("--head"),
+        "should include head branch"
+      );
+      const headIdx2 = createCallData.args.indexOf("--head");
+      assert.strictEqual(
+        createCallData.args[headIdx2 + 1],
+        "test-branch",
+        "should include head branch"
+      );
+      assert.ok(
+        createCallData.args.includes("--body-file"),
+        "should use body file"
+      );
     });
 
     test("extracts URL from verbose output", async () => {
@@ -193,7 +233,7 @@ describe("GitHubPRStrategy with mock executor", () => {
         "Some prefix text\nhttps://github.com/owner/repo/pull/789\nSome suffix text"
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -209,45 +249,13 @@ describe("GitHubPRStrategy with mock executor", () => {
       assert.equal(result.url, "https://github.com/owner/repo/pull/789");
     });
 
-    test("uses github.com as default host when host is undefined", async () => {
-      mockExecutor.responses.set(
-        "gh pr create",
-        "https://github.com/owner/repo/pull/999"
-      );
-
-      // Test defensive fallback when host is undefined at runtime
-      const repoInfoWithoutHost = {
-        type: "github" as const,
-        gitUrl: "git@github.com:owner/repo.git",
-        owner: "owner",
-        repo: "repo",
-      } as GitHubRepoInfo;
-
-      const strategy = new GitHubPRStrategy(mockExecutor);
-      const options: PRStrategyOptions = {
-        repoInfo: repoInfoWithoutHost,
-        title: "Test PR",
-        body: "Test body",
-        branchName: "test-branch",
-        baseBranch: "main",
-        workDir: testDir,
-        retries: 0,
-      };
-
-      const result = await strategy.create(options);
-
-      assert.equal(result.success, true);
-      // URL regex should still match using default github.com
-      assert.equal(result.url, "https://github.com/owner/repo/pull/999");
-    });
-
     test("cleans up body file after success", async () => {
       mockExecutor.responses.set(
         "gh pr create",
         "https://github.com/owner/repo/pull/123"
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -267,7 +275,7 @@ describe("GitHubPRStrategy with mock executor", () => {
     test("cleans up body file after error", async () => {
       mockExecutor.responses.set("gh pr create", new Error("Command failed"));
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -283,16 +291,49 @@ describe("GitHubPRStrategy with mock executor", () => {
       const bodyFile = join(testDir, ".pr-body.md");
       assert.equal(existsSync(bodyFile), false);
     });
-  });
 
-  describe("execute (full workflow)", () => {
-    test("returns existing PR if found", async () => {
+    test("includes --label flags when labels provided", async () => {
       mockExecutor.responses.set(
-        "gh pr list",
-        "https://github.com/owner/repo/pull/existing"
+        "gh pr create",
+        "https://github.com/owner/repo/pull/123"
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const options: PRStrategyOptions = {
+        repoInfo: githubRepoInfo,
+        title: "Test PR",
+        body: "Test body",
+        branchName: "test-branch",
+        baseBranch: "main",
+        workDir: testDir,
+        retries: 0,
+        labels: ["config-sync", "automated"],
+      };
+
+      const result = await strategy.create(options);
+
+      assert.equal(result.success, true);
+      const createCall = mockExecutor.calls.find(
+        (c) => c.executable === "gh" && c.args.includes("create")
+      );
+      assert.ok(createCall);
+      assert.ok(createCall.args.includes("--label"));
+      const labelIndices = createCall.args.reduce<number[]>((acc, a, i) => {
+        if (a === "--label") acc.push(i);
+        return acc;
+      }, []);
+      const labelValues = labelIndices.map((i) => createCall.args[i + 1]);
+      assert.ok(labelValues.includes("config-sync"));
+      assert.ok(labelValues.includes("automated"));
+    });
+
+    test("creates PR without --label flags when no labels", async () => {
+      mockExecutor.responses.set(
+        "gh pr create",
+        "https://github.com/owner/repo/pull/124"
+      );
+
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -303,12 +344,69 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      const result = await strategy.execute(options);
+      const result = await strategy.create(options);
+
+      assert.equal(result.success, true);
+      const createCallNoLabel = mockExecutor.calls.find(
+        (c) => c.executable === "gh" && c.args.includes("create")
+      );
+      assert.ok(createCallNoLabel);
+      assert.ok(!createCallNoLabel.args.includes("--label"));
+    });
+
+    test("creates PR without --label flags when labels is empty array", async () => {
+      mockExecutor.responses.set(
+        "gh pr create",
+        "https://github.com/owner/repo/pull/125"
+      );
+
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const options: PRStrategyOptions = {
+        repoInfo: githubRepoInfo,
+        title: "Test PR",
+        body: "Test body",
+        branchName: "test-branch",
+        baseBranch: "main",
+        workDir: testDir,
+        retries: 0,
+        labels: [],
+      };
+
+      const result = await strategy.create(options);
+
+      assert.equal(result.success, true);
+      const createCallEmptyLabel = mockExecutor.calls.find(
+        (c) => c.executable === "gh" && c.args.includes("create")
+      );
+      assert.ok(createCallEmptyLabel);
+      assert.ok(!createCallEmptyLabel.args.includes("--label"));
+    });
+  });
+
+  describe("execute (full workflow)", () => {
+    test("returns existing PR if found", async () => {
+      mockExecutor.responses.set(
+        "gh pr list",
+        "https://github.com/owner/repo/pull/existing"
+      );
+
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const options: PRStrategyOptions = {
+        repoInfo: githubRepoInfo,
+        title: "Test PR",
+        body: "Test body",
+        branchName: "test-branch",
+        baseBranch: "main",
+        workDir: testDir,
+        retries: 0,
+      };
+
+      const result = await new PRWorkflowExecutor(strategy).execute(options);
 
       assert.equal(result.success, true);
       assert.equal(result.url, "https://github.com/owner/repo/pull/existing");
       assert.ok(result.message.includes("already exists"));
-      // Should only call checkExistingPR, not create
+      // Should only call findExistingPRUrl, not create
       assert.equal(mockExecutor.calls.length, 1);
     });
 
@@ -319,7 +417,7 @@ describe("GitHubPRStrategy with mock executor", () => {
         "https://github.com/owner/repo/pull/999"
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -330,11 +428,11 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      const result = await strategy.execute(options);
+      const result = await new PRWorkflowExecutor(strategy).execute(options);
 
       assert.equal(result.success, true);
       assert.equal(result.url, "https://github.com/owner/repo/pull/999");
-      // Should call both checkExistingPR and create
+      // Should call both findExistingPRUrl and create
       assert.equal(mockExecutor.calls.length, 2);
     });
 
@@ -342,7 +440,7 @@ describe("GitHubPRStrategy with mock executor", () => {
       mockExecutor.responses.set("gh pr list", "");
       mockExecutor.responses.set("gh pr create", new Error("Failed to create"));
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const options: PRStrategyOptions = {
         repoInfo: githubRepoInfo,
         title: "Test PR",
@@ -353,7 +451,7 @@ describe("GitHubPRStrategy with mock executor", () => {
         retries: 0,
       };
 
-      const result = await strategy.execute(options);
+      const result = await new PRWorkflowExecutor(strategy).execute(options);
 
       assert.equal(result.success, false);
       assert.ok(result.message.includes("Failed to create PR"));
@@ -370,7 +468,7 @@ describe("GitHubPRStrategy cleanup error handling", () => {
     host: "github.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
+  let mockExecutor: ExecutorMockResult;
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -392,7 +490,7 @@ describe("GitHubPRStrategy cleanup error handling", () => {
       "https://github.com/owner/repo/pull/123"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -413,7 +511,7 @@ describe("GitHubPRStrategy cleanup error handling", () => {
   test("cleans up temp file even when PR creation fails", async () => {
     mockExecutor.responses.set("gh pr create", new Error("PR creation failed"));
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -470,8 +568,8 @@ describe("GitHubPRStrategy URL extraction edge cases (TDD for issue #92)", () =>
     host: "github.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
-  const testDirEdge = join(process.cwd(), "test-github-strategy-edge-tmp");
+  let mockExecutor: ExecutorMockResult;
+  const testDirEdge = join(tmpdir(), "test-github-strategy-edge-tmp");
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -494,7 +592,7 @@ describe("GitHubPRStrategy URL extraction edge cases (TDD for issue #92)", () =>
       "Error: failed to create pull request"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -518,7 +616,7 @@ describe("GitHubPRStrategy URL extraction edge cases (TDD for issue #92)", () =>
       "PR created: https://github.com/owner/repo/pull/123."
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -545,7 +643,7 @@ describe("GitHubPRStrategy URL extraction edge cases (TDD for issue #92)", () =>
       "See related: https://github.com/owner/repo/issues/456"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -569,7 +667,7 @@ describe("GitHubPRStrategy URL extraction edge cases (TDD for issue #92)", () =>
       "Based on commit https://github.com/owner/repo/commit/abc123"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -592,7 +690,7 @@ describe("GitHubPRStrategy URL extraction edge cases (TDD for issue #92)", () =>
       "https://github.com/owner/repo/pull/789\n"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -618,8 +716,8 @@ describe("GitHubPRStrategy closeExistingPR", () => {
     host: "github.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
-  const testDirClose = join(process.cwd(), "test-github-strategy-close-tmp");
+  let mockExecutor: ExecutorMockResult;
+  const testDirClose = join(tmpdir(), "test-github-strategy-close-tmp");
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -635,10 +733,10 @@ describe("GitHubPRStrategy closeExistingPR", () => {
     }
   });
 
-  test("returns false when no PR exists", async () => {
+  test("returns no_pr when no PR exists", async () => {
     mockExecutor.responses.set("gh pr list", "");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const result = await strategy.closeExistingPR({
       repoInfo: githubRepoInfo,
       branchName: "test-branch",
@@ -647,17 +745,17 @@ describe("GitHubPRStrategy closeExistingPR", () => {
       retries: 0,
     });
 
-    assert.equal(result, false);
+    assert.deepStrictEqual(result, { status: "no_pr" });
   });
 
-  test("closes PR and returns true when PR exists", async () => {
+  test("closes PR and returns closed when PR exists", async () => {
     mockExecutor.responses.set(
       "gh pr list",
       "https://github.com/owner/repo/pull/123"
     );
     mockExecutor.responses.set("gh pr close", "");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const result = await strategy.closeExistingPR({
       repoInfo: githubRepoInfo,
       branchName: "test-branch",
@@ -666,47 +764,41 @@ describe("GitHubPRStrategy closeExistingPR", () => {
       retries: 0,
     });
 
-    assert.equal(result, true);
-    const closeCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh pr close")
+    assert.deepStrictEqual(result, { status: "closed" });
+    const closeCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("close")
     );
     assert.ok(closeCall);
-    assert.ok(closeCall.command.includes("123"));
-    assert.ok(closeCall.command.includes("--delete-branch"));
+    assert.ok(closeCall.args.includes("123"));
+    assert.ok(closeCall.args.includes("--delete-branch"));
   });
 
-  test("throws error when PR number cannot be extracted from URL (issue #93)", async () => {
-    // This tests the fix for issue #93: when checkExistingPR returns a URL
-    // but we can't extract the PR number, we should throw an error rather
-    // than returning false (which would incorrectly indicate no PR exists)
+  test("returns close_failed when PR number cannot be extracted from URL (issue #93)", async () => {
     mockExecutor.responses.set(
       "gh pr list",
       "https://github.com/owner/repo/invalid-url-format"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
 
-    await assert.rejects(
-      () =>
-        strategy.closeExistingPR({
-          repoInfo: githubRepoInfo,
-          branchName: "test-branch",
-          baseBranch: "main",
-          workDir: testDirClose,
-          retries: 0,
-        }),
-      /Could not extract PR number from URL/
-    );
+    const result = await strategy.closeExistingPR({
+      repoInfo: githubRepoInfo,
+      branchName: "test-branch",
+      baseBranch: "main",
+      workDir: testDirClose,
+      retries: 0,
+    });
+    assert.equal(result.status, "close_failed");
   });
 
-  test("returns false when close command fails", async () => {
+  test("returns close_failed when close command fails", async () => {
     mockExecutor.responses.set(
       "gh pr list",
       "https://github.com/owner/repo/pull/123"
     );
     mockExecutor.responses.set("gh pr close", new Error("Close failed"));
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const result = await strategy.closeExistingPR({
       repoInfo: githubRepoInfo,
       branchName: "test-branch",
@@ -715,7 +807,25 @@ describe("GitHubPRStrategy closeExistingPR", () => {
       retries: 0,
     });
 
-    assert.equal(result, false);
+    assert.equal(result.status, "close_failed");
+  });
+
+  test("returns close_failed when PR URL cannot be parsed", async () => {
+    mockExecutor.responses.set(
+      "gh pr list",
+      "https://github.com/owner/repo/issues/999"
+    );
+
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
+    const result = await strategy.closeExistingPR({
+      repoInfo: githubRepoInfo,
+      branchName: "test-branch",
+      baseBranch: "main",
+      workDir: testDirClose,
+      retries: 0,
+    });
+
+    assert.equal(result.status, "close_failed");
   });
 });
 
@@ -728,7 +838,7 @@ describe("GitHubPRStrategy with GitHub Enterprise Server", () => {
     host: "github.mycompany.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
+  let mockExecutor: ExecutorMockResult;
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -747,7 +857,7 @@ describe("GitHubPRStrategy with GitHub Enterprise Server", () => {
   test("uses HOST/OWNER/REPO format for GHE in pr list", async () => {
     mockExecutor.responses.set("gh pr list", "");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: gheRepoInfo,
       title: "Test PR",
@@ -758,24 +868,36 @@ describe("GitHubPRStrategy with GitHub Enterprise Server", () => {
       retries: 0,
     };
 
-    await strategy.checkExistingPR(options);
+    await strategy.findExistingPRUrl(options);
 
-    assert.ok(mockExecutor.calls[0].command.includes("--repo"));
-    assert.ok(
-      mockExecutor.calls[0].command.includes(
-        "'github.mycompany.com/owner/repo'"
-      )
+    assert.ok(mockExecutor.calls[0].args.includes("--repo"));
+    const gheRepoIdx = mockExecutor.calls[0].args.indexOf("--repo");
+    assert.strictEqual(
+      mockExecutor.calls[0].args[gheRepoIdx + 1],
+      "github.mycompany.com/owner/repo"
     );
   });
 
   test("uses --hostname flag for gh api on GHE", async () => {
     mockExecutor.responses.set("gh api", "true");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
-    await strategy.checkAutoMergeEnabled(gheRepoInfo, testDir, 0);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
+    await (
+      strategy as unknown as {
+        checkAutoMergeEnabled: (
+          repoInfo: GitHubRepoInfo,
+          cwd: string,
+          retries: number
+        ) => Promise<boolean>;
+      }
+    ).checkAutoMergeEnabled(gheRepoInfo, testDir, 0);
 
-    assert.ok(mockExecutor.calls[0].command.includes("--hostname"));
-    assert.ok(mockExecutor.calls[0].command.includes("'github.mycompany.com'"));
+    assert.ok(mockExecutor.calls[0].args.includes("--hostname"));
+    const hostnameIdx = mockExecutor.calls[0].args.indexOf("--hostname");
+    assert.strictEqual(
+      mockExecutor.calls[0].args[hostnameIdx + 1],
+      "github.mycompany.com"
+    );
   });
 
   test("extracts GHE PR URL correctly", async () => {
@@ -784,7 +906,7 @@ describe("GitHubPRStrategy with GitHub Enterprise Server", () => {
       "https://github.mycompany.com/owner/repo/pull/123"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: gheRepoInfo,
       title: "Test PR",
@@ -810,7 +932,7 @@ describe("GitHubPRStrategy with GitHub Enterprise Server", () => {
     );
     mockExecutor.responses.set("gh pr close", "");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     await strategy.closeExistingPR({
       repoInfo: gheRepoInfo,
       branchName: "test-branch",
@@ -819,11 +941,16 @@ describe("GitHubPRStrategy with GitHub Enterprise Server", () => {
       retries: 0,
     });
 
-    const closeCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh pr close")
+    const closeCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("close")
     );
     assert.ok(closeCall);
-    assert.ok(closeCall.command.includes("'github.mycompany.com/owner/repo'"));
+    assert.ok(closeCall.args.includes("--repo"));
+    const gheCloseRepoIdx = closeCall.args.indexOf("--repo");
+    assert.strictEqual(
+      closeCall.args[gheCloseRepoIdx + 1],
+      "github.mycompany.com/owner/repo"
+    );
   });
 });
 
@@ -836,7 +963,7 @@ describe("GitHubPRStrategy merge", () => {
     host: "github.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
+  let mockExecutor: ExecutorMockResult;
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -852,55 +979,67 @@ describe("GitHubPRStrategy merge", () => {
     }
   });
 
-  describe("checkAutoMergeEnabled", () => {
-    test("returns true when auto-merge is enabled", async () => {
-      mockExecutor.responses.set("gh api repos", "true");
+  describe("merge auto mode checks auto-merge status", () => {
+    test("skips merge when auto-merge is not enabled on repo", async () => {
+      mockExecutor.responses.set("gh api", "false");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
-      const result = await strategy.checkAutoMergeEnabled(
-        githubRepoInfo,
-        testDir,
-        0
-      );
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const result = await strategy.merge({
+        prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
+        config: { mode: "auto" },
+        workDir: testDir,
+        retries: 0,
+      });
 
-      assert.equal(result, true);
-      assert.equal(mockExecutor.calls.length, 1);
-      assert.ok(mockExecutor.calls[0].command.includes("gh api repos"));
-      assert.ok(mockExecutor.calls[0].command.includes("allow_auto_merge"));
+      assert.equal(result.success, true);
+      assert.equal(result.merged, false);
+      assert.equal(result.autoMergeEnabled, false);
+      assert.ok(result.message.includes("Auto-merge not enabled"));
     });
 
-    test("returns false when auto-merge is disabled", async () => {
-      mockExecutor.responses.set("gh api repos", "false");
+    test("enables auto-merge when repo supports it", async () => {
+      mockExecutor.responses.set("gh api", "true");
+      mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
-      const result = await strategy.checkAutoMergeEnabled(
-        githubRepoInfo,
-        testDir,
-        0
-      );
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const result = await strategy.merge({
+        prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
+        config: { mode: "auto" },
+        workDir: testDir,
+        retries: 0,
+      });
 
-      assert.equal(result, false);
+      assert.equal(result.success, true);
+      assert.equal(result.autoMergeEnabled, true);
     });
 
-    test("returns false on API error", async () => {
-      mockExecutor.responses.set("gh api repos", new Error("API error"));
+    test("gracefully handles API error when checking auto-merge", async () => {
+      mockExecutor.responses.set("gh api", new Error("API error"));
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
-      const result = await strategy.checkAutoMergeEnabled(
-        githubRepoInfo,
-        testDir,
-        0
-      );
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
+      const result = await strategy.merge({
+        prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
+        config: { mode: "auto" },
+        workDir: testDir,
+        retries: 0,
+      });
 
-      assert.equal(result, false);
+      // checkAutoMergeEnabled returns false on error, so merge reports not enabled
+      assert.equal(result.success, true);
+      assert.equal(result.merged, false);
+      assert.equal(result.autoMergeEnabled, false);
     });
   });
 
   describe("merge with manual mode", () => {
     test("returns success without making any calls", async () => {
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const result = await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "manual" },
         workDir: testDir,
         retries: 0,
@@ -915,12 +1054,13 @@ describe("GitHubPRStrategy merge", () => {
 
   describe("merge with auto mode", () => {
     test("enables auto-merge when repo has it enabled", async () => {
-      mockExecutor.responses.set("gh api repos", "true");
+      mockExecutor.responses.set("gh api", "true");
       mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const result = await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "auto" },
         workDir: testDir,
         retries: 0,
@@ -933,16 +1073,18 @@ describe("GitHubPRStrategy merge", () => {
 
       // Should call gh api to check, then gh pr merge --auto
       assert.equal(mockExecutor.calls.length, 2);
-      assert.ok(mockExecutor.calls[1].command.includes("gh pr merge"));
-      assert.ok(mockExecutor.calls[1].command.includes("--auto"));
+      assert.strictEqual(mockExecutor.calls[1].executable, "gh");
+      assert.ok(mockExecutor.calls[1].args.includes("merge"));
+      assert.ok(mockExecutor.calls[1].args.includes("--auto"));
     });
 
     test("falls back to manual when auto-merge not enabled on repo", async () => {
-      mockExecutor.responses.set("gh api repos", "false");
+      mockExecutor.responses.set("gh api", "false");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const result = await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "auto" },
         workDir: testDir,
         retries: 0,
@@ -958,69 +1100,73 @@ describe("GitHubPRStrategy merge", () => {
     });
 
     test("uses squash strategy when configured", async () => {
-      mockExecutor.responses.set("gh api repos", "true");
+      mockExecutor.responses.set("gh api", "true");
       mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "auto", strategy: "squash" },
         workDir: testDir,
         retries: 0,
       });
 
-      const mergeCall = mockExecutor.calls.find((c) =>
-        c.command.includes("gh pr merge")
+      const mergeCall = mockExecutor.calls.find(
+        (c) => c.executable === "gh" && c.args.includes("merge")
       );
       assert.ok(mergeCall, "Should have called gh pr merge");
-      assert.ok(mergeCall.command.includes("--squash"));
+      assert.ok(mergeCall.args.includes("--squash"));
     });
 
     test("uses rebase strategy when configured", async () => {
-      mockExecutor.responses.set("gh api repos", "true");
+      mockExecutor.responses.set("gh api", "true");
       mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "auto", strategy: "rebase" },
         workDir: testDir,
         retries: 0,
       });
 
-      const mergeCall = mockExecutor.calls.find((c) =>
-        c.command.includes("gh pr merge")
+      const mergeCall = mockExecutor.calls.find(
+        (c) => c.executable === "gh" && c.args.includes("merge")
       );
       assert.ok(mergeCall);
-      assert.ok(mergeCall.command.includes("--rebase"));
+      assert.ok(mergeCall.args.includes("--rebase"));
     });
 
     test("uses delete-branch flag when configured", async () => {
-      mockExecutor.responses.set("gh api repos", "true");
+      mockExecutor.responses.set("gh api", "true");
       mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "auto", deleteBranch: true },
         workDir: testDir,
         retries: 0,
       });
 
-      const mergeCall = mockExecutor.calls.find((c) =>
-        c.command.includes("gh pr merge")
+      const mergeCall = mockExecutor.calls.find(
+        (c) => c.executable === "gh" && c.args.includes("merge")
       );
       assert.ok(mergeCall);
-      assert.ok(mergeCall.command.includes("--delete-branch"));
+      assert.ok(mergeCall.args.includes("--delete-branch"));
     });
 
     test("returns failure when gh pr merge fails", async () => {
-      mockExecutor.responses.set("gh api repos", "true");
+      mockExecutor.responses.set("gh api", "true");
       mockExecutor.responses.set("gh pr merge", new Error("Merge failed"));
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const result = await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "auto" },
         workDir: testDir,
         retries: 0,
@@ -1036,9 +1182,10 @@ describe("GitHubPRStrategy merge", () => {
     test("uses admin flag to bypass requirements", async () => {
       mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const result = await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "force" },
         workDir: testDir,
         retries: 0,
@@ -1049,25 +1196,27 @@ describe("GitHubPRStrategy merge", () => {
       assert.ok(result.message.includes("admin privileges"));
 
       assert.equal(mockExecutor.calls.length, 1);
-      assert.ok(mockExecutor.calls[0].command.includes("gh pr merge"));
-      assert.ok(mockExecutor.calls[0].command.includes("--admin"));
+      assert.strictEqual(mockExecutor.calls[0].executable, "gh");
+      assert.ok(mockExecutor.calls[0].args.includes("merge"));
+      assert.ok(mockExecutor.calls[0].args.includes("--admin"));
     });
 
     test("uses merge strategy with force mode", async () => {
       mockExecutor.responses.set("gh pr merge", "");
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "force", strategy: "squash", deleteBranch: true },
         workDir: testDir,
         retries: 0,
       });
 
       const mergeCall = mockExecutor.calls[0];
-      assert.ok(mergeCall.command.includes("--admin"));
-      assert.ok(mergeCall.command.includes("--squash"));
-      assert.ok(mergeCall.command.includes("--delete-branch"));
+      assert.ok(mergeCall.args.includes("--admin"));
+      assert.ok(mergeCall.args.includes("--squash"));
+      assert.ok(mergeCall.args.includes("--delete-branch"));
     });
 
     test("returns failure when force merge fails", async () => {
@@ -1076,9 +1225,10 @@ describe("GitHubPRStrategy merge", () => {
         new Error("Must be admin to merge")
       );
 
-      const strategy = new GitHubPRStrategy(mockExecutor);
+      const strategy = new GitHubPRStrategy(mockExecutor.mock);
       const result = await strategy.merge({
         prUrl: "https://github.com/owner/repo/pull/123",
+        repoInfo: githubRepoInfo,
         config: { mode: "force" },
         workDir: testDir,
         retries: 0,
@@ -1100,7 +1250,7 @@ describe("GitHubPRStrategy with token parameter", () => {
     host: "github.com",
   };
 
-  let mockExecutor: ReturnType<typeof createMockExecutor>;
+  let mockExecutor: ExecutorMockResult;
 
   beforeEach(() => {
     mockExecutor = createMockExecutor();
@@ -1116,13 +1266,13 @@ describe("GitHubPRStrategy with token parameter", () => {
     }
   });
 
-  test("checkExistingPR uses GH_TOKEN env prefix when token is provided", async () => {
+  test("findExistingPRUrl uses GH_TOKEN env prefix when token is provided", async () => {
     mockExecutor.responses.set(
       "gh pr list",
       "https://github.com/owner/repo/pull/123"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -1134,9 +1284,10 @@ describe("GitHubPRStrategy with token parameter", () => {
       token: "ghs_test_token_12345",
     };
 
-    await strategy.checkExistingPR(options);
+    await strategy.findExistingPRUrl(options);
 
-    assert.ok(mockExecutor.calls[0].command.startsWith("gh pr list"));
+    assert.strictEqual(mockExecutor.calls[0].executable, "gh");
+    assert.ok(mockExecutor.calls[0].args.includes("list"));
     assert.equal(
       mockExecutor.calls[0].options?.env?.GH_TOKEN,
       "ghs_test_token_12345",
@@ -1150,7 +1301,7 @@ describe("GitHubPRStrategy with token parameter", () => {
       "https://github.com/owner/repo/pull/456"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -1164,14 +1315,10 @@ describe("GitHubPRStrategy with token parameter", () => {
 
     await strategy.create(options);
 
-    const createCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh pr create")
+    const createCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("create")
     );
     assert.ok(createCall, "Should have called gh pr create");
-    assert.ok(
-      createCall.command.startsWith("gh pr create"),
-      "Command should start with gh pr create"
-    );
     assert.equal(
       createCall.options?.env?.GH_TOKEN,
       "ghs_test_token_12345",
@@ -1186,7 +1333,7 @@ describe("GitHubPRStrategy with token parameter", () => {
     );
     mockExecutor.responses.set("gh pr close", "");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     await strategy.closeExistingPR({
       repoInfo: githubRepoInfo,
       branchName: "test-branch",
@@ -1197,11 +1344,11 @@ describe("GitHubPRStrategy with token parameter", () => {
     });
 
     // Both list and close should use the token via env var
-    const listCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh pr list")
+    const listCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("list")
     );
-    const closeCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh pr close")
+    const closeCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("close")
     );
 
     assert.equal(listCall?.options?.env?.GH_TOKEN, "ghs_test_token_12345");
@@ -1209,12 +1356,13 @@ describe("GitHubPRStrategy with token parameter", () => {
   });
 
   test("merge uses GH_TOKEN env prefix when token is provided", async () => {
-    mockExecutor.responses.set("gh api repos", "true");
+    mockExecutor.responses.set("gh api", "true");
     mockExecutor.responses.set("gh pr merge", "");
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     await strategy.merge({
       prUrl: "https://github.com/owner/repo/pull/123",
+      repoInfo: githubRepoInfo,
       config: { mode: "auto" },
       workDir: testDir,
       retries: 0,
@@ -1222,11 +1370,11 @@ describe("GitHubPRStrategy with token parameter", () => {
     });
 
     // Both api and merge should use the token via env var
-    const apiCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh api")
+    const apiCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("api")
     );
-    const mergeCall = mockExecutor.calls.find((c) =>
-      c.command.includes("gh pr merge")
+    const mergeCall = mockExecutor.calls.find(
+      (c) => c.executable === "gh" && c.args.includes("merge")
     );
 
     assert.equal(
@@ -1247,7 +1395,7 @@ describe("GitHubPRStrategy with token parameter", () => {
       "https://github.com/owner/repo/pull/123"
     );
 
-    const strategy = new GitHubPRStrategy(mockExecutor);
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
     const options: PRStrategyOptions = {
       repoInfo: githubRepoInfo,
       title: "Test PR",
@@ -1259,16 +1407,186 @@ describe("GitHubPRStrategy with token parameter", () => {
       // No token provided
     };
 
-    await strategy.checkExistingPR(options);
+    await strategy.findExistingPRUrl(options);
 
-    assert.ok(
-      mockExecutor.calls[0].command.startsWith("gh pr list"),
-      "Command should start with gh pr list"
-    );
+    assert.strictEqual(mockExecutor.calls[0].executable, "gh");
+    assert.ok(mockExecutor.calls[0].args.includes("list"));
     assert.equal(
       mockExecutor.calls[0].options?.env,
       undefined,
       "No env should be set when no token is provided"
     );
+  });
+});
+
+describe("GitHubPRStrategy logger coverage", () => {
+  const githubRepoInfo: GitHubRepoInfo = {
+    type: "github",
+    gitUrl: "git@github.com:owner/repo.git",
+    owner: "owner",
+    repo: "repo",
+    host: "github.com",
+  };
+
+  let mockExecutor: ExecutorMockResult;
+
+  beforeEach(() => {
+    mockExecutor = createMockExecutor();
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  test("findExistingPRUrl logs debug on error with stderr", async () => {
+    const debugMessages: string[] = [];
+    const mockLogger = {
+      debug(msg: string) {
+        debugMessages.push(msg);
+      },
+      warn() {},
+      info() {},
+    };
+
+    const errorWithStderr = Object.assign(new Error("Command failed"), {
+      stderr: "gh: connection refused",
+    });
+    mockExecutor.responses.set("gh pr list", errorWithStderr);
+
+    const strategy = new GitHubPRStrategy(mockExecutor.mock, mockLogger);
+    const result = await strategy.findExistingPRUrl({
+      repoInfo: githubRepoInfo,
+      branchName: "test-branch",
+      baseBranch: "main",
+      workDir: testDir,
+      retries: 0,
+    });
+
+    assert.equal(result, null);
+    assert.ok(debugMessages.some((m) => m.includes("GitHub PR check failed")));
+  });
+
+  test("closeExistingPR logs warn on close error", async () => {
+    const warnMessages: string[] = [];
+    const mockLogger = {
+      debug() {},
+      warn(msg: string) {
+        warnMessages.push(msg);
+      },
+      info() {},
+    };
+
+    // First call returns a PR URL, second call (close) throws
+    mockExecutor.responses.set(
+      "gh pr list",
+      "https://github.com/owner/repo/pull/42"
+    );
+    mockExecutor.responses.set("gh pr close", new Error("Permission denied"));
+
+    const strategy = new GitHubPRStrategy(mockExecutor.mock, mockLogger);
+    const result = await strategy.closeExistingPR({
+      repoInfo: githubRepoInfo,
+      branchName: "test-branch",
+      baseBranch: "main",
+      workDir: testDir,
+      retries: 0,
+    });
+
+    assert.equal(result.status, "close_failed");
+    assert.ok(
+      warnMessages.some((m) => m.includes("Failed to close existing PR"))
+    );
+  });
+
+  test("merge auto mode logs warn when auto-merge not enabled", async () => {
+    const warnMessages: string[] = [];
+    const infoMessages: string[] = [];
+    const mockLogger = {
+      debug() {},
+      warn(msg: string) {
+        warnMessages.push(msg);
+      },
+      info(msg: string) {
+        infoMessages.push(msg);
+      },
+    };
+
+    // gh api returns false for allow_auto_merge
+    mockExecutor.responses.set("gh api", "false");
+
+    const strategy = new GitHubPRStrategy(mockExecutor.mock, mockLogger);
+    const result = await strategy.merge({
+      prUrl: "https://github.com/owner/repo/pull/1",
+      repoInfo: githubRepoInfo,
+      config: { mode: "auto" },
+      workDir: testDir,
+      retries: 0,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.merged, false);
+    assert.ok(warnMessages.some((m) => m.includes("Auto-merge not enabled")));
+    assert.ok(infoMessages.some((m) => m.includes("--enable-auto-merge")));
+  });
+
+  test("checkAutoMergeEnabled logs warn on error", async () => {
+    const warnMessages: string[] = [];
+    const mockLogger = {
+      debug() {},
+      warn(msg: string) {
+        warnMessages.push(msg);
+      },
+      info() {},
+    };
+
+    mockExecutor.responses.set("gh api", new Error("API error"));
+
+    const strategy = new GitHubPRStrategy(mockExecutor.mock, mockLogger);
+    const result = await strategy.merge({
+      prUrl: "https://github.com/owner/repo/pull/1",
+      repoInfo: githubRepoInfo,
+      config: { mode: "auto" },
+      workDir: testDir,
+      retries: 0,
+    });
+
+    // When check fails, auto-merge is assumed not enabled
+    assert.equal(result.success, true);
+    assert.equal(result.merged, false);
+    assert.ok(
+      warnMessages.some((m) => m.includes("Could not check auto-merge status"))
+    );
+  });
+});
+
+describe("GitHubPRStrategy merge unknown mode", () => {
+  const githubRepoInfo: GitHubRepoInfo = {
+    type: "github",
+    gitUrl: "git@github.com:owner/repo.git",
+    owner: "owner",
+    repo: "repo",
+    host: "github.com",
+  };
+
+  test("returns failure for unknown merge mode", async () => {
+    const mockExecutor = createMockExecutor();
+    const strategy = new GitHubPRStrategy(mockExecutor.mock);
+    const result = await strategy.merge({
+      prUrl: "https://github.com/owner/repo/pull/1",
+      repoInfo: githubRepoInfo,
+      config: { mode: "unknown" as "manual" },
+      workDir: "/tmp/test",
+      retries: 0,
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.merged, false);
+    assert.ok(result.message.includes("Merge not applicable for mode:"));
   });
 });

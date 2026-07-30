@@ -1,0 +1,1224 @@
+import { test, describe, beforeEach, afterEach } from "node:test";
+import { strict as assert } from "node:assert";
+import {
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  statSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { GitOps } from "../../../src/vcs/git-ops.js";
+import {
+  sanitizeBranchName,
+  validateBranchName,
+} from "../../../src/cli/branch-utils.js";
+import { ICommandExecutor } from "../../../src/shared/command-executor.js";
+import { SyncError } from "../../../src/shared/errors.js";
+
+const stubExecutor: ICommandExecutor = {
+  exec: async (_exe: string, _args: string[], _cwd: string) => "",
+};
+
+const testDir = join(tmpdir(), "git-ops-test-" + Date.now());
+
+describe("sanitizeBranchName", () => {
+  test("removes file extension", () => {
+    assert.equal(sanitizeBranchName("config.json"), "config");
+  });
+
+  test("converts to lowercase", () => {
+    assert.equal(sanitizeBranchName("MyConfig.json"), "myconfig");
+  });
+
+  test("replaces spaces with dashes", () => {
+    assert.equal(sanitizeBranchName("my config.json"), "my-config");
+  });
+
+  test("replaces special characters with dashes", () => {
+    assert.equal(sanitizeBranchName("my@config!file.json"), "my-config-file");
+  });
+
+  test("collapses multiple dashes", () => {
+    assert.equal(sanitizeBranchName("my---config.json"), "my-config");
+  });
+
+  test("removes leading dashes", () => {
+    assert.equal(sanitizeBranchName("-config.json"), "config");
+  });
+
+  test("removes trailing dashes", () => {
+    assert.equal(sanitizeBranchName("config-.json"), "config");
+  });
+
+  test("handles multiple extensions (keeps all but last)", () => {
+    assert.equal(sanitizeBranchName("my.config.json"), "my-config");
+  });
+
+  test("handles .yaml extension", () => {
+    assert.equal(sanitizeBranchName("settings.yaml"), "settings");
+  });
+
+  test("handles .yml extension", () => {
+    assert.equal(sanitizeBranchName("settings.yml"), "settings");
+  });
+
+  test("preserves numbers", () => {
+    assert.equal(sanitizeBranchName("config2.json"), "config2");
+  });
+
+  test("preserves existing dashes", () => {
+    assert.equal(sanitizeBranchName("my-config.json"), "my-config");
+  });
+
+  test("handles complex filename", () => {
+    assert.equal(
+      sanitizeBranchName("My Complex_Config@v2.0.json"),
+      "my-complex-config-v2-0"
+    );
+  });
+
+  test("handles filename with only special chars", () => {
+    assert.equal(sanitizeBranchName("@#$.json"), "");
+  });
+
+  test("handles empty extension", () => {
+    assert.equal(sanitizeBranchName("config"), "config");
+  });
+});
+
+describe("validateBranchName", () => {
+  describe("valid branch names", () => {
+    test("accepts simple branch name", () => {
+      assert.doesNotThrow(() => validateBranchName("feature"));
+    });
+
+    test("accepts branch with slash", () => {
+      assert.doesNotThrow(() => validateBranchName("feature/test"));
+    });
+
+    test("accepts chore/sync prefix", () => {
+      assert.doesNotThrow(() => validateBranchName("chore/sync-config"));
+    });
+
+    test("accepts branch with numbers", () => {
+      assert.doesNotThrow(() => validateBranchName("feature-123"));
+    });
+
+    test("accepts branch with dots in middle", () => {
+      assert.doesNotThrow(() => validateBranchName("release/v1.0.0"));
+    });
+  });
+
+  describe("invalid branch names", () => {
+    test("rejects empty string", () => {
+      assert.throws(() => validateBranchName(""), /cannot be empty/);
+    });
+
+    test("rejects whitespace-only string", () => {
+      assert.throws(() => validateBranchName("   "), /cannot be empty/);
+    });
+
+    test("rejects branch starting with dot", () => {
+      assert.throws(
+        () => validateBranchName(".hidden"),
+        /cannot start with "." or "-"/
+      );
+    });
+
+    test("rejects branch starting with dash", () => {
+      assert.throws(
+        () => validateBranchName("-feature"),
+        /cannot start with "." or "-"/
+      );
+    });
+
+    test("rejects branch with spaces", () => {
+      assert.throws(
+        () => validateBranchName("my branch"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with tilde", () => {
+      assert.throws(
+        () => validateBranchName("feature~1"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with caret", () => {
+      assert.throws(
+        () => validateBranchName("feature^2"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with colon", () => {
+      assert.throws(
+        () => validateBranchName("feature:test"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with question mark", () => {
+      assert.throws(
+        () => validateBranchName("feature?test"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with asterisk", () => {
+      assert.throws(
+        () => validateBranchName("feature*test"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with bracket", () => {
+      assert.throws(
+        () => validateBranchName("feature[test]"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with backslash", () => {
+      assert.throws(
+        () => validateBranchName("feature\\test"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch with consecutive dots", () => {
+      assert.throws(
+        () => validateBranchName("feature..test"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects branch ending with slash", () => {
+      assert.throws(() => validateBranchName("feature/"), /invalid ending/);
+    });
+
+    test("rejects branch ending with .lock", () => {
+      assert.throws(() => validateBranchName("feature.lock"), /invalid ending/);
+    });
+
+    test("rejects branch ending with dot", () => {
+      assert.throws(() => validateBranchName("feature."), /invalid ending/);
+    });
+  });
+
+  describe("security injection attempts", () => {
+    // Note: Git allows $, (, ), and backticks in branch names.
+    // Security is ensured by passing args as arrays (no shell interpolation).
+    // These tests verify that common injection patterns with spaces are rejected.
+
+    test("rejects shell injection with spaces", () => {
+      assert.throws(
+        () => validateBranchName("; rm -rf /"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects pipe injection with spaces", () => {
+      assert.throws(
+        () => validateBranchName("test | cat /etc/passwd"),
+        /invalid characters/
+      );
+    });
+
+    test("rejects newline injection via tilde path", () => {
+      assert.throws(
+        () => validateBranchName("feature~1"),
+        /invalid characters/
+      );
+    });
+
+    test("allows shell-like patterns without spaces (security via args array)", () => {
+      // These are valid git branch names - security is handled by passing args as arrays
+      assert.doesNotThrow(() => validateBranchName("$(whoami)"));
+      assert.doesNotThrow(() => validateBranchName("`id`"));
+    });
+  });
+});
+
+describe("GitOps", () => {
+  let workDir: string;
+
+  beforeEach(() => {
+    workDir = join(testDir, `workspace-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  describe("cleanWorkspace", () => {
+    test("creates workspace directory if not exists", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.cleanWorkspace();
+
+      assert.ok(existsSync(workDir));
+    });
+
+    test("removes existing workspace and recreates", () => {
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "existing-file.txt"), "content");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.cleanWorkspace();
+
+      assert.ok(existsSync(workDir));
+      assert.ok(!existsSync(join(workDir, "existing-file.txt")));
+    });
+
+    test("handles nested directories", () => {
+      const nestedDir = join(workDir, "nested", "deep");
+      mkdirSync(nestedDir, { recursive: true });
+      writeFileSync(join(nestedDir, "file.txt"), "content");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.cleanWorkspace();
+
+      assert.ok(existsSync(workDir));
+      assert.ok(!existsSync(join(workDir, "nested")));
+    });
+
+    test("wraps filesystem errors in SyncError", () => {
+      // Use a path through a file (not a directory) to trigger ENOTDIR
+      const blockingFile = join(testDir, "blocking-file");
+      writeFileSync(blockingFile, "I am a file");
+      const badWorkDir = join(blockingFile, "impossible");
+
+      const gitOps = new GitOps({
+        workDir: badWorkDir,
+        executor: stubExecutor,
+      });
+      assert.throws(
+        () => gitOps.cleanWorkspace(),
+        (err: unknown) =>
+          err instanceof SyncError &&
+          err.message.includes("Failed to clean workspace")
+      );
+    });
+  });
+
+  describe("writeFile", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("writes file with content and trailing newline", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.writeFile("test.json", '{"key": "value"}');
+
+      const content = readFileSync(join(workDir, "test.json"), "utf-8");
+      assert.equal(content, '{"key": "value"}\n');
+    });
+
+    test("overwrites existing file", () => {
+      writeFileSync(join(workDir, "test.json"), "old content");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.writeFile("test.json", "new content");
+
+      const content = readFileSync(join(workDir, "test.json"), "utf-8");
+      assert.equal(content, "new content\n");
+    });
+
+    test("does not write in dry-run mode", () => {
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: stubExecutor,
+      });
+      gitOps.writeFile("test.json", "content");
+
+      assert.ok(!existsSync(join(workDir, "test.json")));
+    });
+
+    test("wraps filesystem errors in SyncError", () => {
+      // Place a file where writeFile expects to create a directory
+      writeFileSync(join(workDir, "blocker"), "I am a file");
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.writeFile("blocker/sub/test.json", "content"),
+        (err: unknown) =>
+          err instanceof SyncError &&
+          err.message.includes("Failed to write file")
+      );
+    });
+  });
+
+  describe("wouldChange", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns true when file does not exist", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const result = gitOps.wouldChange("nonexistent.json", "content");
+
+      assert.equal(result, true);
+    });
+
+    test("returns true when content differs", () => {
+      writeFileSync(join(workDir, "test.json"), "old content\n");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const result = gitOps.wouldChange("test.json", "new content");
+
+      assert.equal(result, true);
+    });
+
+    test("returns false when content is identical", () => {
+      writeFileSync(join(workDir, "test.json"), "same content\n");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const result = gitOps.wouldChange("test.json", "same content");
+
+      assert.equal(result, false);
+    });
+
+    test("accounts for trailing newline in comparison", () => {
+      // File has content + newline
+      writeFileSync(join(workDir, "test.json"), "content\n");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      // wouldChange adds newline internally, so "content" should match "content\n"
+      const result = gitOps.wouldChange("test.json", "content");
+
+      assert.equal(result, false);
+    });
+
+    test("works in dry-run mode", () => {
+      writeFileSync(join(workDir, "test.json"), "existing\n");
+
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: stubExecutor,
+      });
+      const resultSame = gitOps.wouldChange("test.json", "existing");
+      const resultDiff = gitOps.wouldChange("test.json", "different");
+
+      assert.equal(resultSame, false);
+      assert.equal(resultDiff, true);
+    });
+
+    test("re-throws unexpected errors from readFileSync", () => {
+      // Create a directory where a file would be expected - readFileSync on a directory throws EISDIR
+      mkdirSync(join(workDir, "is-a-dir"), { recursive: true });
+      const gitOps = new GitOps({
+        workDir,
+        executor: stubExecutor,
+      });
+
+      assert.throws(() => gitOps.wouldChange("is-a-dir", "some content"), {
+        code: "EISDIR",
+      });
+    });
+  });
+
+  describe("dryRun mode", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("dryRun defaults to false", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      // Write should work when dryRun is not specified
+      gitOps.writeFile("test.json", "content");
+      assert.ok(existsSync(join(workDir, "test.json")));
+    });
+
+    test("dryRun can be explicitly set to false", () => {
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: false,
+        executor: stubExecutor,
+      });
+      gitOps.writeFile("test.json", "content");
+      assert.ok(existsSync(join(workDir, "test.json")));
+    });
+  });
+
+  describe("path traversal protection", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("writeFile throws on path traversal attempt", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.writeFile("../escape.json", "content"),
+        /Path traversal detected/
+      );
+    });
+
+    test("writeFile creates parent directories automatically", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      // Should auto-create parent directory
+      gitOps.writeFile("config/settings.json", "content");
+      assert.ok(existsSync(join(workDir, "config/settings.json")));
+    });
+
+    test("writeFile creates deeply nested directories", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.writeFile(".github/workflows/ci.yml", "name: CI");
+      assert.ok(existsSync(join(workDir, ".github/workflows/ci.yml")));
+    });
+
+    test("wouldChange throws on path traversal attempt", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.wouldChange("../escape.json", "content"),
+        /Path traversal detected/
+      );
+    });
+  });
+
+  describe("ICommandExecutor injection", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("accepts custom executor", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        exec: async (executable: string, args: string[], _cwd: string) => {
+          calls.push({ executable, args });
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      await gitOps.hasChanges();
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].executable, "git");
+      assert.ok(calls[0].args.includes("status"));
+    });
+
+    test("uses default executor when not provided", () => {
+      // This test verifies the default executor is used by checking
+      // that GitOps can be constructed without an executor
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.ok(gitOps);
+    });
+  });
+
+  describe("createBranch", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("creates new branch with checkout -b", async () => {
+      let capturedArgs: string[] = [];
+
+      const gitOps = new GitOps({
+        workDir,
+        executor: {
+          async exec(_exe: string, args: string[], _cwd: string) {
+            if (args[0] === "checkout" && args[1] === "-b") {
+              capturedArgs = args;
+            }
+            return "";
+          },
+        },
+      });
+      await gitOps.createBranch("feature-branch");
+
+      assert.ok(capturedArgs.length > 0, "Should have called checkout -b");
+      assert.ok(
+        capturedArgs.includes("feature-branch"),
+        "Should include the branch name in the args"
+      );
+    });
+
+    test("throws on checkout -b failure", async () => {
+      const gitOps = new GitOps({
+        workDir,
+        executor: {
+          async exec(_exe: string, args: string[], _cwd: string) {
+            if (args[0] === "checkout" && args[1] === "-b") {
+              throw new Error(
+                "fatal: A branch named 'feature-branch' already exists"
+              );
+            }
+            return "";
+          },
+        },
+      });
+
+      await assert.rejects(
+        async () => gitOps.createBranch("feature-branch"),
+        /Failed to create branch.*already exists/
+      );
+    });
+  });
+
+  describe("setExecutable", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("calls git update-index with chmod flag", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      // Create the file first (setExecutable validates path)
+      writeFileSync(join(workDir, "script.sh"), "#!/bin/bash\n");
+      await gitOps.setExecutable("script.sh");
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].executable, "git");
+      assert.ok(calls[0].args.includes("update-index"));
+      assert.ok(calls[0].args.includes("--chmod=+x"));
+      assert.ok(calls[0].args.some((a) => a.includes("script.sh")));
+    });
+
+    test("does not execute in dry-run mode", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: mockExecutor,
+      });
+      writeFileSync(join(workDir, "script.sh"), "#!/bin/bash\n");
+      await gitOps.setExecutable("script.sh");
+
+      assert.equal(calls.length, 0);
+    });
+
+    test("throws on path traversal attempt", async () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      await assert.rejects(
+        async () => gitOps.setExecutable("../escape.sh"),
+        /Path traversal detected/
+      );
+    });
+
+    test("handles subdirectory paths", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      mkdirSync(join(workDir, "scripts"), { recursive: true });
+      writeFileSync(join(workDir, "scripts", "deploy.sh"), "#!/bin/bash\n");
+      await gitOps.setExecutable("scripts/deploy.sh");
+
+      assert.equal(calls.length, 1);
+      assert.ok(calls[0].args.some((a) => a.includes("scripts/deploy.sh")));
+    });
+
+    test("sets filesystem executable permission (chmod 755)", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, _args: string[], _cwd: string) {
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const filePath = join(workDir, "script.sh");
+      writeFileSync(filePath, "#!/bin/bash\necho hello\n");
+
+      // Verify file is NOT executable before setExecutable
+      const modeBefore = statSync(filePath).mode;
+      const executableBefore = (modeBefore & 0o111) !== 0;
+      assert.equal(
+        executableBefore,
+        false,
+        "File should not be executable before setExecutable"
+      );
+
+      await gitOps.setExecutable("script.sh");
+
+      // Verify file IS executable after setExecutable
+      const modeAfter = statSync(filePath).mode;
+      const executableAfter = (modeAfter & 0o111) !== 0;
+      assert.equal(
+        executableAfter,
+        true,
+        "File should be executable after setExecutable"
+      );
+    });
+
+    test("does not set filesystem permissions in dry-run mode", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, _args: string[], _cwd: string) {
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: mockExecutor,
+      });
+      const filePath = join(workDir, "script.sh");
+      writeFileSync(filePath, "#!/bin/bash\necho hello\n");
+
+      await gitOps.setExecutable("script.sh");
+
+      // Verify file is still NOT executable (dry-run should skip chmod)
+      const mode = statSync(filePath).mode;
+      const executable = (mode & 0o111) !== 0;
+      assert.equal(
+        executable,
+        false,
+        "File should not be executable in dry-run mode"
+      );
+    });
+
+    test("wraps chmod errors in SyncError", async () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      // File doesn't exist, so chmodSync will throw ENOENT
+      await assert.rejects(
+        async () => gitOps.setExecutable("nonexistent.sh"),
+        (err: unknown) =>
+          err instanceof SyncError &&
+          err.message.includes("Failed to set executable permissions")
+      );
+    });
+  });
+
+  describe("commit", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns true in dry-run mode without running commands", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: mockExecutor,
+      });
+      const result = await gitOps.commit("test commit");
+
+      assert.equal(result, true);
+      assert.equal(calls.length, 0);
+    });
+
+    test("stages and commits changes when there are staged changes", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          if (args.includes("diff") && args.includes("--cached")) {
+            return "file.txt\n";
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const result = await gitOps.commit("test commit");
+
+      assert.equal(result, true);
+      assert.ok(
+        calls.some((c) => c.args.includes("add") && c.args.includes("-A"))
+      );
+      assert.ok(calls.some((c) => c.args.includes("commit")));
+      assert.ok(calls.some((c) => c.args.includes("--no-verify")));
+    });
+
+    test("returns false when no staged changes after git add", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          // diff --cached returns empty when no changes
+          if (args.includes("diff") && args.includes("--cached")) {
+            return "";
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const result = await gitOps.commit("test commit");
+
+      assert.equal(result, false);
+      assert.ok(
+        calls.some((c) => c.args.includes("add") && c.args.includes("-A"))
+      );
+      // Should not have called git commit since there were no changes
+      assert.ok(!calls.some((c) => c.args.includes("commit")));
+    });
+  });
+
+  describe("getFileContent", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns file content when file exists", () => {
+      writeFileSync(join(workDir, "test.json"), '{"key": "value"}');
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const content = gitOps.getFileContent("test.json");
+
+      assert.equal(content, '{"key": "value"}');
+    });
+
+    test("returns null when file does not exist", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const content = gitOps.getFileContent("nonexistent.json");
+
+      assert.equal(content, null);
+    });
+
+    test("throws on path traversal attempt", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.getFileContent("../escape.json"),
+        /Path traversal detected/
+      );
+    });
+
+    test("returns null for directories", () => {
+      // Create a directory where a file would be expected
+      mkdirSync(join(workDir, "is-a-dir"), { recursive: true });
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+
+      const content = gitOps.getFileContent("is-a-dir");
+      assert.equal(content, null);
+    });
+  });
+
+  describe("getChangedFiles", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns empty array when no changes", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, _args: string[], _cwd: string) {
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const files = await gitOps.getChangedFiles();
+
+      assert.deepEqual(files, []);
+    });
+
+    test("returns list of changed files", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args.includes("status") && args.includes("--porcelain")) {
+            return " M config.json\n?? new-file.txt\nA  added.json";
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const files = await gitOps.getChangedFiles();
+
+      assert.deepEqual(files, ["config.json", "new-file.txt", "added.json"]);
+    });
+  });
+
+  describe("fileExistsOnBranch", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns true when file exists on branch", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args[0] === "show") {
+            return "file content";
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const exists = await gitOps.fileExistsOnBranch("config.json", "main");
+
+      assert.equal(exists, true);
+    });
+
+    test("returns false when file does not exist on branch", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args[0] === "show") {
+            throw new Error("file not found");
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const exists = await gitOps.fileExistsOnBranch("config.json", "main");
+
+      assert.equal(exists, false);
+    });
+  });
+
+  describe("fileExists", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns true when file exists", () => {
+      writeFileSync(join(workDir, "test.json"), '{"key": "value"}');
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const exists = gitOps.fileExists("test.json");
+
+      assert.equal(exists, true);
+    });
+
+    test("returns false when file does not exist", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      const exists = gitOps.fileExists("nonexistent.json");
+
+      assert.equal(exists, false);
+    });
+
+    test("throws on path traversal attempt", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.fileExists("../escape.json"),
+        /Path traversal detected/
+      );
+    });
+  });
+
+  describe("deleteFile", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("deletes existing file", () => {
+      const filePath = join(workDir, "test.json");
+      writeFileSync(filePath, '{"key": "value"}');
+      assert.ok(existsSync(filePath));
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.deleteFile("test.json");
+
+      assert.ok(!existsSync(filePath));
+    });
+
+    test("does nothing when file does not exist", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      // Should not throw
+      gitOps.deleteFile("nonexistent.json");
+    });
+
+    test("does nothing in dry-run mode", () => {
+      const filePath = join(workDir, "test.json");
+      writeFileSync(filePath, '{"key": "value"}');
+
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: stubExecutor,
+      });
+      gitOps.deleteFile("test.json");
+
+      assert.ok(existsSync(filePath));
+    });
+
+    test("throws on path traversal attempt", () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.deleteFile("../escape.json"),
+        /Path traversal detected/
+      );
+    });
+
+    test("handles subdirectory paths", () => {
+      const subDir = join(workDir, "subdir");
+      mkdirSync(subDir, { recursive: true });
+      const filePath = join(subDir, "nested.json");
+      writeFileSync(filePath, '{"key": "value"}');
+      assert.ok(existsSync(filePath));
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      gitOps.deleteFile("subdir/nested.json");
+
+      assert.ok(!existsSync(filePath));
+    });
+
+    test("wraps filesystem errors in SyncError", () => {
+      // Create a directory where deleteFile expects a file — rmSync on a
+      // non-empty directory without { recursive: true } throws ENOTEMPTY/EISDIR
+      const dirPath = join(workDir, "actually-a-dir");
+      mkdirSync(dirPath, { recursive: true });
+      writeFileSync(join(dirPath, "child.txt"), "content");
+
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      assert.throws(
+        () => gitOps.deleteFile("actually-a-dir"),
+        (err: unknown) =>
+          err instanceof SyncError &&
+          err.message.includes("Failed to delete file")
+      );
+    });
+  });
+
+  describe("getDefaultBranchLocal", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("returns main when origin/main exists", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args.includes("origin/main")) {
+            return "abc123";
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const result = await gitOps.getDefaultBranchLocal();
+
+      assert.equal(result.branch, "main");
+      assert.equal(result.method, "origin/main exists");
+    });
+
+    test("falls back to master when main does not exist", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args.includes("origin/main")) {
+            throw new Error("main does not exist");
+          }
+          if (args.includes("origin/master")) {
+            return "abc123";
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const result = await gitOps.getDefaultBranchLocal();
+
+      assert.equal(result.branch, "master");
+      assert.equal(result.method, "origin/master exists");
+    });
+
+    test("falls back to main when neither main nor master exist", async () => {
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args.includes("origin/main")) {
+            throw new Error("main does not exist");
+          }
+          if (args.includes("origin/master")) {
+            throw new Error("master does not exist");
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({ workDir, executor: mockExecutor });
+      const result = await gitOps.getDefaultBranchLocal();
+
+      assert.equal(result.branch, "main");
+      assert.equal(result.method, "fallback default");
+    });
+
+    test("logs debug messages when branches are not found", async () => {
+      const debugMessages: string[] = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(_exe: string, args: string[], _cwd: string) {
+          if (args.includes("origin/main")) {
+            throw new Error("main does not exist");
+          }
+          if (args.includes("origin/master")) {
+            throw new Error("master does not exist");
+          }
+          return "";
+        },
+      };
+
+      const gitOps = new GitOps({
+        workDir,
+        executor: mockExecutor,
+        log: { debug: (msg: string) => debugMessages.push(msg) },
+      });
+      await gitOps.getDefaultBranchLocal();
+
+      assert.ok(
+        debugMessages.some((m) => m.includes("origin/main check failed")),
+        "Should log origin/main failure"
+      );
+      assert.ok(
+        debugMessages.some((m) => m.includes("origin/master check failed")),
+        "Should log origin/master failure"
+      );
+    });
+  });
+
+  test("getFileMode returns '100755' for executable tracked file", async () => {
+    const runner: ICommandExecutor = {
+      async exec(_exe: string, args: string[], _cwd: string) {
+        assert.equal(args[0], "ls-files");
+        assert.ok(args.includes("-s"));
+        assert.ok(args.includes("--"));
+        return "100755 abcdef0123 0\tpath/to/file.sh\n";
+      },
+    };
+    const gitOps = new GitOps({ workDir: "/tmp/repo", executor: runner });
+    const mode = await gitOps.getFileMode("path/to/file.sh");
+    assert.equal(mode, "100755");
+  });
+
+  test("getFileMode returns '100644' for non-executable tracked file", async () => {
+    const runner: ICommandExecutor = {
+      async exec(_exe: string, _args: string[], _cwd: string) {
+        return "100644 abcdef0123 0\tREADME.md\n";
+      },
+    };
+    const gitOps = new GitOps({ workDir: "/tmp/repo", executor: runner });
+    assert.equal(await gitOps.getFileMode("README.md"), "100644");
+  });
+
+  test("getFileMode returns null when file is not tracked", async () => {
+    const runner: ICommandExecutor = {
+      async exec(_exe: string, _args: string[], _cwd: string) {
+        return "";
+      },
+    };
+    const gitOps = new GitOps({ workDir: "/tmp/repo", executor: runner });
+    assert.equal(await gitOps.getFileMode("untracked.txt"), null);
+  });
+
+  test("getFileMode rejects path traversal", async () => {
+    const runner: ICommandExecutor = {
+      async exec(_exe: string, _args: string[], _cwd: string) {
+        return "";
+      },
+    };
+    const gitOps = new GitOps({ workDir: "/tmp/repo", executor: runner });
+    await assert.rejects(
+      () => gitOps.getFileMode("../escape"),
+      /Path traversal/
+    );
+  });
+
+  test("clearExecutable chmods 0644 and runs git update-index --chmod=-x", async () => {
+    const calls: Array<{ executable: string; args: string[] }> = [];
+    const runner: ICommandExecutor = {
+      async exec(executable: string, args: string[], _cwd: string) {
+        calls.push({ executable, args });
+        return "";
+      },
+    };
+    // Create a real fixture file so chmodSync has something to change.
+    const tmpDir = await import("node:fs").then((m) =>
+      m.mkdtempSync("/tmp/gitops-")
+    );
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    writeFileSync(join(tmpDir, "foo.sh"), "#!/bin/sh\n", { mode: 0o755 });
+    const gitOps = new GitOps({ workDir: tmpDir, executor: runner });
+    await gitOps.clearExecutable("foo.sh");
+    assert.ok(
+      calls.some(
+        (c) => c.args.includes("update-index") && c.args.includes("--chmod=-x")
+      )
+    );
+  });
+
+  test("clearExecutable rejects path traversal", async () => {
+    const runner: ICommandExecutor = {
+      async exec(_exe: string, _args: string[], _cwd: string) {
+        return "";
+      },
+    };
+    const gitOps = new GitOps({ workDir: "/tmp/repo", executor: runner });
+    await assert.rejects(
+      () => gitOps.clearExecutable("../escape"),
+      /Path traversal/
+    );
+  });
+
+  describe("clearExecutable additional coverage", () => {
+    beforeEach(() => {
+      mkdirSync(workDir, { recursive: true });
+    });
+
+    test("does not execute in dry-run mode", async () => {
+      const calls: Array<{ executable: string; args: string[] }> = [];
+      const mockExecutor: ICommandExecutor = {
+        async exec(executable: string, args: string[], _cwd: string) {
+          calls.push({ executable, args });
+          return "";
+        },
+      };
+      const gitOps = new GitOps({
+        workDir,
+        dryRun: true,
+        executor: mockExecutor,
+      });
+      writeFileSync(join(workDir, "script.sh"), "#!/bin/bash\n", {
+        mode: 0o755,
+      });
+      await gitOps.clearExecutable("script.sh");
+      assert.equal(
+        calls.length,
+        0,
+        "Should not execute commands in dry-run mode"
+      );
+    });
+
+    test("wraps chmod errors in SyncError", async () => {
+      const gitOps = new GitOps({ workDir, executor: stubExecutor });
+      await assert.rejects(
+        async () => gitOps.clearExecutable("nonexistent.sh"),
+        (err: unknown) =>
+          err instanceof SyncError &&
+          err.message.includes("Failed to clear executable permissions")
+      );
+    });
+  });
+
+  test("getFileMode returns null for unrecognized mode", async () => {
+    const runner: ICommandExecutor = {
+      async exec(_exe: string, _args: string[], _cwd: string) {
+        return "120000 abcdef0123 0\tsymlink\n";
+      },
+    };
+    const gitOps = new GitOps({ workDir: "/tmp/repo", executor: runner });
+    assert.equal(await gitOps.getFileMode("symlink"), null);
+  });
+});

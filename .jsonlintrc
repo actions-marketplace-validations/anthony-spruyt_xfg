@@ -1,0 +1,3 @@
+{
+  "patterns": ["**/*.json", "!test/fixtures/templates/invalid\\.json"]
+}

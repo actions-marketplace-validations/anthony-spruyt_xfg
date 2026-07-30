@@ -3,6 +3,7 @@ export type {
   ExecutorMockConfig,
   ExecutorMockResult,
   GitCommandTracking,
+  MockResponse,
 } from "./executor.mock.js";
 
 export { createMockLogger } from "./logger.mock.js";
@@ -18,8 +19,9 @@ export type {
 export { createMockAuthenticatedGitOps } from "./authenticated-git-ops.mock.js";
 export type {
   AuthenticatedGitOpsMockConfig,
-  AuthenticatedGitOpsMockCalls,
   AuthenticatedGitOpsMockResult,
+  LocalGitOpsMockCalls,
+  NetworkGitOpsMockCalls,
 } from "./authenticated-git-ops.mock.js";
 
 export type { MockCallTracker } from "./types.js";

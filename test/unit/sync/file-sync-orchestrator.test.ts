@@ -6,11 +6,15 @@ import { tmpdir } from "node:os";
 import { FileSyncOrchestrator } from "../../../src/sync/file-sync-orchestrator.js";
 import {
   createMockAuthenticatedGitOps,
+  createMockExecutor,
   createMockLogger,
 } from "../../mocks/index.js";
-import { createDiffStats } from "../../../src/sync/diff-utils.js";
+import {
+  createDiffStats,
+  incrementDiffStats,
+} from "../../../src/sync/diff-utils.js";
 import type { IFileWriter, IManifestManager } from "../../../src/sync/types.js";
-import type { GitHubRepoInfo } from "../../../src/shared/repo-detector.js";
+import type { GitHubRepoInfo } from "../../../src/repo/index.js";
 import type { RepoConfig } from "../../../src/config/types.js";
 
 const testDir = join(tmpdir(), "file-sync-orchestrator-test-" + Date.now());
@@ -45,31 +49,41 @@ describe("FileSyncOrchestrator", () => {
       }
     >
   ): IFileWriter {
+    const diffStats = createDiffStats();
+    for (const [, info] of fileChanges) {
+      if (info.action === "create") incrementDiffStats(diffStats, "NEW");
+      else if (info.action === "update")
+        incrementDiffStats(diffStats, "MODIFIED");
+    }
     return {
       writeFiles: async () => ({
         fileChanges,
-        diffStats: createDiffStats(),
+        diffStats,
       }),
     };
   }
 
   function createMockManifestManager(): IManifestManager & {
     calls: {
-      processOrphans: number;
+      detectOrphans: number;
       deleteOrphans: number;
       saveUpdatedManifest: number;
     };
   } {
     const calls = {
-      processOrphans: 0,
+      detectOrphans: 0,
       deleteOrphans: 0,
       saveUpdatedManifest: 0,
     };
     return {
       calls,
-      processOrphans: () => {
-        calls.processOrphans++;
-        return { manifest: { version: 3, configs: {} }, filesToDelete: [] };
+      detectOrphans: () => {
+        calls.detectOrphans++;
+        return {
+          manifest: { version: 4, configs: {} },
+          existingManifest: null,
+          filesToDelete: [],
+        };
       },
       deleteOrphans: async () => {
         calls.deleteOrphans++;
@@ -82,7 +96,7 @@ describe("FileSyncOrchestrator", () => {
 
   describe("sync", () => {
     test("orchestrates file writing and manifest handling", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({});
+      const { gitOps } = createMockAuthenticatedGitOps({});
       const { mock: mockLogger } = createMockLogger();
 
       const fileChanges = new Map([
@@ -101,18 +115,23 @@ describe("FileSyncOrchestrator", () => {
       );
 
       const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
+        git: mockRepoInfo.gitUrl,
         files: [{ fileName: "config.json", content: {} }],
       };
 
       const result = await orchestrator.sync(
         repoConfig,
         mockRepoInfo,
-        { gitOps: mockGitOps, baseBranch: "main", cleanup: () => {} },
-        { branchName: "chore/sync", workDir, configId: "test" }
+        { gitOps, baseBranch: "main", cleanup: () => {} },
+        {
+          branchName: "chore/sync",
+          workDir,
+          configId: "test",
+          executor: createMockExecutor().mock,
+        }
       );
 
-      assert.equal(mockManifestManager.calls.processOrphans, 1);
+      assert.equal(mockManifestManager.calls.detectOrphans, 1);
       assert.equal(mockManifestManager.calls.deleteOrphans, 1);
       assert.equal(mockManifestManager.calls.saveUpdatedManifest, 1);
       assert.equal(result.hasChanges, true);
@@ -120,7 +139,7 @@ describe("FileSyncOrchestrator", () => {
     });
 
     test("returns hasChanges false when all files skipped", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({});
+      const { gitOps } = createMockAuthenticatedGitOps({});
       const { mock: mockLogger } = createMockLogger();
 
       const fileChanges = new Map([
@@ -139,22 +158,27 @@ describe("FileSyncOrchestrator", () => {
       );
 
       const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
+        git: mockRepoInfo.gitUrl,
         files: [{ fileName: "config.json", content: {} }],
       };
 
       const result = await orchestrator.sync(
         repoConfig,
         mockRepoInfo,
-        { gitOps: mockGitOps, baseBranch: "main", cleanup: () => {} },
-        { branchName: "chore/sync", workDir, configId: "test" }
+        { gitOps, baseBranch: "main", cleanup: () => {} },
+        {
+          branchName: "chore/sync",
+          workDir,
+          configId: "test",
+          executor: createMockExecutor().mock,
+        }
       );
 
       assert.equal(result.hasChanges, false);
     });
 
     test("logs diff summary in dry-run mode", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({});
+      const { gitOps } = createMockAuthenticatedGitOps({});
       const { mock: mockLogger, diffSummaries } = createMockLogger();
 
       const fileChanges = new Map([
@@ -173,22 +197,28 @@ describe("FileSyncOrchestrator", () => {
       );
 
       const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
+        git: mockRepoInfo.gitUrl,
         files: [{ fileName: "config.json", content: {} }],
       };
 
       await orchestrator.sync(
         repoConfig,
         mockRepoInfo,
-        { gitOps: mockGitOps, baseBranch: "main", cleanup: () => {} },
-        { branchName: "chore/sync", workDir, configId: "test", dryRun: true }
+        { gitOps, baseBranch: "main", cleanup: () => {} },
+        {
+          branchName: "chore/sync",
+          workDir,
+          configId: "test",
+          dryRun: true,
+          executor: createMockExecutor().mock,
+        }
       );
 
       assert.equal(diffSummaries.length, 1);
     });
 
     test("calculates diff stats for non-dry-run", async () => {
-      const { mock: mockGitOps } = createMockAuthenticatedGitOps({});
+      const { gitOps } = createMockAuthenticatedGitOps({});
       const { mock: mockLogger } = createMockLogger();
 
       const fileChanges = new Map([
@@ -215,7 +245,7 @@ describe("FileSyncOrchestrator", () => {
       );
 
       const repoConfig: RepoConfig = {
-        gitUrl: mockRepoInfo.gitUrl,
+        git: mockRepoInfo.gitUrl,
         files: [
           { fileName: "new.json", content: {} },
           { fileName: "updated.json", content: {} },
@@ -225,8 +255,14 @@ describe("FileSyncOrchestrator", () => {
       const result = await orchestrator.sync(
         repoConfig,
         mockRepoInfo,
-        { gitOps: mockGitOps, baseBranch: "main", cleanup: () => {} },
-        { branchName: "chore/sync", workDir, configId: "test", dryRun: false }
+        { gitOps, baseBranch: "main", cleanup: () => {} },
+        {
+          branchName: "chore/sync",
+          workDir,
+          configId: "test",
+          dryRun: false,
+          executor: createMockExecutor().mock,
+        }
       );
 
       assert.equal(result.diffStats.newCount, 1);

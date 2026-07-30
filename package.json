@@ -1,12 +1,21 @@
 {
   "name": "@aspruyt/xfg",
-  "version": "3.9.12",
+  "version": "6.4.2",
   "description": "Manage files, settings, and repositories across GitHub, Azure DevOps, and GitLab — declaratively, from a single YAML config",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "bin": {
     "xfg": "./dist/cli.js"
   },
+  "sideEffects": [
+    "./dist/cli.js"
+  ],
   "files": [
     "dist",
     "PR.md"
@@ -20,22 +29,25 @@
     "url": "https://github.com/anthony-spruyt/xfg/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
-    "dev": "ts-node src/cli.ts",
+    "dev": "tsx src/cli.ts",
     "test": "node --import tsx scripts/run-tests.js",
-    "test:coverage": "c8 --check-coverage --lines 95 --reporter=text --reporter=lcov --all --src=src --exclude='test/**/*.test.ts' --exclude='scripts/**' --exclude='src/vcs/types.ts' --exclude='src/settings/rulesets/types.ts' --exclude='src/settings/repo-settings/types.ts' --exclude='src/**/index.ts' --exclude='test/mocks/**' --exclude='src/sync/types.ts' --exclude='src/lifecycle/types.ts' --exclude='src/cli/program.ts' --exclude='src/cli.ts' --exclude='src/index.ts' npm test",
+    "test:coverage": "c8 --check-coverage --lines 95 --reporter=text --reporter=lcov --all --src=src --exclude='test/**/*.test.ts' --exclude='scripts/**' --exclude='src/vcs/types.ts' --exclude='src/settings/rulesets/types.ts' --exclude='src/settings/repo-settings/types.ts' --exclude='src/settings/labels/types.ts' --exclude='src/**/index.ts' --exclude='test/mocks/**' --exclude='src/sync/types.ts' --exclude='src/lifecycle/types.ts' --exclude='src/cli/program.ts' --exclude='src/cli/types.ts' --exclude='src/cli.ts' --exclude='src/index.ts' npm test",
     "test:integration:github": "npm run build && node --import tsx --test test/integration/github.test.ts",
     "test:integration:ado": "npm run build && node --import tsx --test test/integration/ado.test.ts",
     "test:integration:gitlab": "npm run build && node --import tsx --test test/integration/gitlab.test.ts",
     "test:integration:github-app": "npm run build && node --import tsx --test test/integration/github-app.test.ts",
     "test:integration:github-rulesets": "npm run build && node --import tsx --test test/integration/github-rulesets.test.ts",
     "test:integration:github-repo-settings": "npm run build && node --import tsx --test test/integration/github-repo-settings.test.ts",
+    "test:integration:github-labels": "npm run build && node --import tsx --test test/integration/github-labels.test.ts",
+    "test:integration:github-code-scanning": "npm run build && node --import tsx --test test/integration/github-code-scanning.test.ts",
     "test:integration:github-lifecycle": "npm run build && node --import tsx --test test/integration/github-lifecycle.test.ts",
     "test:integration:github-lifecycle-app": "npm run build && node --import tsx --test test/integration/github-lifecycle-app.test.ts",
+    "test:typecheck": "tsc --project tsconfig.check-tests.json --noEmit",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -55,17 +67,22 @@
   ],
   "author": "Anthony Spruyt",
   "license": "MIT",
+  "funding": {
+    "url": "https://github.com/sponsors/anthony-spruyt"
+  },
   "dependencies": {
     "chalk": "^5.3.0",
-    "commander": "^14.0.2",
+    "commander": "^15.0.0",
     "json5": "^2.2.3",
-    "p-retry": "^7.1.1",
+    "libsodium-wrappers": "^0.8.4",
+    "p-retry": "^8.0.0",
     "yaml": "^2.4.5"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "c8": "^11.0.0",
+    "@types/node": "^24.12.2",
+    "bottleneck": "^2.19.5",
+    "c8": "^12.0.0",
     "tsx": "^4.15.0",
-    "typescript": "^5.4.5"
+    "typescript": "^6.0.0"
   }
 }

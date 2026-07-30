@@ -4,22 +4,6 @@
   "title": "xfg Configuration",
   "description": "Configuration file for xfg CLI tool that syncs JSON, YAML, or text config files across multiple Git repositories",
   "type": "object",
-  "required": [
-    "id",
-    "repos"
-  ],
-  "anyOf": [
-    {
-      "required": [
-        "files"
-      ]
-    },
-    {
-      "required": [
-        "settings"
-      ]
-    }
-  ],
   "properties": {
     "id": {
       "type": "string",
@@ -36,10 +20,23 @@
         "$ref": "#/definitions/fileConfig"
       }
     },
+    "groups": {
+      "type": "object",
+      "description": "Named configuration groups that repos can reference via 'groups: [...]'. Groups create a merge chain: root → group1 → group2 → repo overrides. Each group can define files, prOptions, and settings.",
+      "additionalProperties": {
+        "$ref": "#/definitions/groupConfig"
+      }
+    },
+    "conditionalGroups": {
+      "type": "array",
+      "description": "Conditional groups that activate based on which groups a repo has. Each entry has a 'when' clause (allOf/anyOf/noneOf) and the same files/prOptions/settings as regular groups. Merges after explicit groups, before repo overrides.",
+      "items": {
+        "$ref": "#/definitions/conditionalGroupConfig"
+      }
+    },
     "repos": {
       "type": "array",
-      "description": "List of repository configurations",
-      "minItems": 1,
+      "description": "List of repository configurations. When using directory-based config, repos can be split across multiple files. Directory-based config recursively scans subdirectories.",
       "items": {
         "$ref": "#/definitions/repo"
       }
@@ -66,8 +63,31 @@
       "description": "Global default for orphan deletion. When true, files removed from the xfg config will be deleted from target repos (tracked via .xfg.json manifest). Can be overridden per-file or per-repo. Default: false"
     },
     "settings": {
-      "$ref": "#/definitions/repoSettings",
+      "$ref": "#/definitions/rootSettings",
       "description": "Global repository settings including GitHub Rulesets. Can be overridden per-repo. Settings are merged: per-repo rulesets override root rulesets with same name."
+    },
+    "secrets": {
+      "type": "object",
+      "description": "Secrets config: map of secret names to SecretConfig. Use deleteOrphaned to remove secrets not in config.",
+      "properties": {
+        "deleteOrphaned": {
+          "type": "boolean",
+          "default": false,
+          "description": "Delete secrets from repos that are not defined in this config. Default: false"
+        }
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "boolean",
+            "const": false,
+            "description": "Set to false to disable this secret"
+          },
+          {
+            "$ref": "#/definitions/secretConfig"
+          }
+        ]
+      }
     }
   },
   "definitions": {
@@ -101,10 +121,11 @@
           "enum": [
             "replace",
             "append",
-            "prepend"
+            "prepend",
+            "merge"
           ],
           "default": "replace",
-          "description": "Array merge strategy for this file. 'replace' replaces arrays, 'append' adds overlay after base, 'prepend' adds overlay before base. Default: replace"
+          "description": "Array merge strategy for this file. 'replace' replaces arrays, 'append' adds overlay after base, 'prepend' adds overlay before base, 'merge' deep-merges items matched by identity key (type, actor_id). Default: replace"
         },
         "createOnly": {
           "type": "boolean",
@@ -200,6 +221,13 @@
             ]
           }
         },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of group names to apply to this repo. Groups are merged in order: root → group1 → group2 → repo overrides. Group names must reference groups defined in the root 'groups' object."
+        },
         "prOptions": {
           "$ref": "#/definitions/prOptions",
           "description": "Per-repo PR merge options. Overrides global prOptions."
@@ -264,6 +292,19 @@
         "bypassReason": {
           "type": "string",
           "description": "Reason for bypassing policies (Azure DevOps only, required when merge=force)"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Labels to apply to created PRs/MRs. Labels must exist on the target repository."
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Branch name for sync PRs. Per-repo overrides group, group overrides global. CLI --branch flag overrides all."
         }
       }
     },
@@ -275,7 +316,7 @@
           "oneOf": [
             {
               "type": "object",
-              "description": "Object content overlay for JSON/YAML files. Use $arrayMerge directive to control array merging.",
+              "description": "Object content overlay for JSON/YAML files. Use $arrayMerge + $values directives to control per-field array merging.",
               "additionalProperties": true
             },
             {
@@ -342,6 +383,269 @@
         }
       }
     },
+    "groupConfig": {
+      "type": "object",
+      "description": "Configuration group that can define files, prOptions, and settings. Referenced by repos via 'groups: [groupName]'.",
+      "properties": {
+        "extends": {
+          "description": "Parent group name(s) to inherit files, settings, and PR options from. Accepts a single group name or an array of group names. Parents are merged before the child group.",
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Single parent group name"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "description": "Array of parent group names, merged left-to-right"
+            }
+          ]
+        },
+        "files": {
+          "type": "object",
+          "description": "Files defined or overridden by this group. Keys are filenames. Set to false to remove an inherited file. Set inherit: false to discard all accumulated files from prior layers.",
+          "properties": {
+            "inherit": {
+              "type": "boolean",
+              "description": "Set to false to discard all files accumulated from root and earlier groups. Default: true"
+            }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to remove this file from the group's output"
+              },
+              {
+                "$ref": "#/definitions/fileConfig"
+              },
+              {
+                "$ref": "#/definitions/repoFileOverride"
+              }
+            ]
+          }
+        },
+        "prOptions": {
+          "$ref": "#/definitions/prOptions",
+          "description": "PR merge options for repos using this group. Overrides root prOptions, can be overridden by repo prOptions."
+        },
+        "settings": {
+          "$ref": "#/definitions/repoSettings",
+          "description": "Settings for repos using this group. Supports inherit: false on rulesets/labels sub-sections. Merged between root and repo settings."
+        }
+      }
+    },
+    "conditionalGroupConfig": {
+      "type": "object",
+      "description": "Conditional group that activates based on which groups a repo has. Has a 'when' clause and the same files/prOptions/settings as regular groups.",
+      "required": [
+        "when"
+      ],
+      "properties": {
+        "when": {
+          "type": "object",
+          "description": "Condition that determines when this group activates. At least one of allOf, anyOf, or noneOf is required.",
+          "properties": {
+            "allOf": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "description": "All listed groups must be present in the repo's groups array"
+            },
+            "anyOf": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "description": "At least one listed group must be present in the repo's groups array"
+            },
+            "noneOf": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "description": "None of the listed groups may be present in the repo's groups array"
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "allOf"
+              ]
+            },
+            {
+              "required": [
+                "anyOf"
+              ]
+            },
+            {
+              "required": [
+                "noneOf"
+              ]
+            }
+          ]
+        },
+        "files": {
+          "type": "object",
+          "description": "Files defined or overridden by this conditional group. Same capabilities as regular group files.",
+          "properties": {
+            "inherit": {
+              "type": "boolean",
+              "description": "Set to false to discard all files accumulated from root, groups, and earlier conditional groups. Default: true"
+            }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to remove this file"
+              },
+              {
+                "$ref": "#/definitions/fileConfig"
+              },
+              {
+                "$ref": "#/definitions/repoFileOverride"
+              }
+            ]
+          }
+        },
+        "prOptions": {
+          "$ref": "#/definitions/prOptions",
+          "description": "PR merge options for repos matching this condition."
+        },
+        "settings": {
+          "$ref": "#/definitions/repoSettings",
+          "description": "Settings for repos matching this condition. Supports inherit: false on rulesets/labels sub-sections."
+        }
+      }
+    },
+    "codeScanningSettings": {
+      "type": "object",
+      "description": "GitHub code scanning default setup configuration",
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["configured", "not-configured"],
+          "description": "Enable or disable code scanning default setup"
+        },
+        "querySuite": {
+          "type": "string",
+          "enum": ["default", "extended"],
+          "description": "Query suite to use: 'default' for standard queries, 'extended' for additional queries"
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "actions",
+              "c-cpp",
+              "csharp",
+              "go",
+              "java-kotlin",
+              "javascript-typescript",
+              "python",
+              "ruby",
+              "swift"
+            ]
+          },
+          "description": "Languages to analyze. If omitted, GitHub auto-detects languages in the repository."
+        }
+      }
+    },
+    "rootSettings": {
+      "type": "object",
+      "description": "Global repository settings including GitHub Rulesets and repository features. inherit is not valid at root level.",
+      "properties": {
+        "rulesets": {
+          "type": "object",
+          "description": "Map of ruleset names to configurations. Set a ruleset to false to disable it.",
+          "properties": {
+            "inherit": false
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to disable this ruleset"
+              },
+              {
+                "$ref": "#/definitions/ruleset"
+              }
+            ]
+          }
+        },
+        "repo": {
+          "$ref": "#/definitions/githubRepoSettings",
+          "description": "GitHub repository settings (features, merge options, security)."
+        },
+        "labels": {
+          "type": "object",
+          "description": "Map of label names to configurations. Set a label to false to disable it.",
+          "properties": {
+            "inherit": false
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to disable this label"
+              },
+              {
+                "$ref": "#/definitions/label"
+              }
+            ]
+          }
+        },
+        "codeScanning": {
+          "$ref": "#/definitions/codeScanningSettings",
+          "description": "GitHub code scanning default setup configuration."
+        },
+        "variables": {
+          "type": "object",
+          "description": "Map of GitHub Actions variable names to values. Set a variable to false to disable it. Use deleteOrphaned to remove variables not in config.",
+          "properties": {
+            "deleteOrphaned": {
+              "type": "boolean",
+              "default": false,
+              "description": "Delete variables from repos that are not defined in this config. Independent from the settings-level deleteOrphaned flag. Default: false"
+            }
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to disable this variable"
+              },
+              {
+                "type": "string",
+                "description": "Variable value"
+              }
+            ]
+          }
+        },
+        "deleteOrphaned": {
+          "type": "boolean",
+          "default": false,
+          "description": "Track managed resources for orphan deletion. When true, if a ruleset or label is removed from the config, it will be deleted from the repo. Default: false"
+        }
+      }
+    },
     "repoSettings": {
       "type": "object",
       "description": "Repository settings including GitHub Rulesets and repository features",
@@ -381,10 +685,73 @@
           ],
           "description": "GitHub repository settings (features, merge options, security). Set to false at per-repo level to opt out of inherited settings."
         },
+        "labels": {
+          "type": "object",
+          "description": "Map of label names to configurations. Set a label to false to opt out. Set inherit: false to skip all inherited labels.",
+          "properties": {
+            "inherit": {
+              "type": "boolean",
+              "description": "Set to false to skip all inherited root labels. Default: true"
+            }
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to opt out of this inherited label"
+              },
+              {
+                "$ref": "#/definitions/label"
+              }
+            ]
+          }
+        },
+        "codeScanning": {
+          "oneOf": [
+            {
+              "type": "boolean",
+              "const": false,
+              "description": "Set to false to opt out of inherited code scanning settings"
+            },
+            {
+              "$ref": "#/definitions/codeScanningSettings"
+            }
+          ],
+          "description": "GitHub code scanning default setup configuration. Set to false at per-repo level to opt out of inherited settings."
+        },
+        "variables": {
+          "type": "object",
+          "description": "Map of GitHub Actions variable names to values. Set a variable to false to opt out. Set inherit: false to skip all inherited variables.",
+          "properties": {
+            "inherit": {
+              "type": "boolean",
+              "description": "Set to false to skip all inherited root variables. Default: true"
+            },
+            "deleteOrphaned": {
+              "type": "boolean",
+              "default": false,
+              "description": "Delete variables from repos that are not defined in this config. Overrides root-level variables.deleteOrphaned. Default: false"
+            }
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "const": false,
+                "description": "Set to false to opt out of this inherited variable"
+              },
+              {
+                "type": "string",
+                "description": "Variable value"
+              }
+            ]
+          }
+        },
         "deleteOrphaned": {
           "type": "boolean",
           "default": false,
-          "description": "Track rulesets for orphan deletion. When true, if a ruleset is removed from the config, it will be deleted from the repo. Default: false"
+          "description": "Track managed resources for orphan deletion. When true, if a ruleset or label is removed from the config, it will be deleted from the repo. Default: false"
         }
       }
     },
@@ -521,6 +888,64 @@
         }
       }
     },
+    "arrayMergeDirective": {
+      "type": "object",
+      "description": "Merge directive for arrays. Instead of replacing the base array, append, prepend, or deep-merge values with the inherited array.",
+      "required": ["$arrayMerge", "$values"],
+      "properties": {
+        "$arrayMerge": {
+          "type": "string",
+          "enum": ["replace", "append", "prepend", "merge"],
+          "description": "How to merge with the base array: 'append' adds after, 'prepend' adds before, 'replace' replaces entirely, 'merge' deep-merges items matched by identity key (type, actor_id)"
+        },
+        "$values": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Values to merge with the base array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "bypassActorsArrayMergeDirective": {
+      "type": "object",
+      "description": "Merge directive for bypassActors array",
+      "required": ["$arrayMerge", "$values"],
+      "properties": {
+        "$arrayMerge": {
+          "type": "string",
+          "enum": ["replace", "append", "prepend", "merge"],
+          "description": "How to merge with the base array"
+        },
+        "$values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/bypassActor"
+          },
+          "description": "Bypass actor values to merge"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rulesArrayMergeDirective": {
+      "type": "object",
+      "description": "Merge directive for rules array",
+      "required": ["$arrayMerge", "$values"],
+      "properties": {
+        "$arrayMerge": {
+          "type": "string",
+          "enum": ["replace", "append", "prepend", "merge"],
+          "description": "How to merge with the base array"
+        },
+        "$values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/rulesetRule"
+          },
+          "description": "Rule values to merge"
+        }
+      },
+      "additionalProperties": false
+    },
     "ruleset": {
       "type": "object",
       "description": "GitHub Ruleset configuration",
@@ -545,22 +970,36 @@
           "description": "Enforcement level: 'active' enforces rules, 'disabled' turns off rules, 'evaluate' evaluates rules without blocking (dry run). Default: active"
         },
         "bypassActors": {
-          "type": "array",
-          "description": "Actors who can bypass this ruleset",
-          "items": {
-            "$ref": "#/definitions/bypassActor"
-          }
+          "oneOf": [
+            {
+              "type": "array",
+              "description": "Actors who can bypass this ruleset",
+              "items": {
+                "$ref": "#/definitions/bypassActor"
+              }
+            },
+            {
+              "$ref": "#/definitions/bypassActorsArrayMergeDirective"
+            }
+          ]
         },
         "conditions": {
           "$ref": "#/definitions/rulesetConditions",
           "description": "Conditions for when this ruleset applies (which branches/tags to target)"
         },
         "rules": {
-          "type": "array",
-          "description": "Rules to enforce on matching refs",
-          "items": {
-            "$ref": "#/definitions/rulesetRule"
-          }
+          "oneOf": [
+            {
+              "type": "array",
+              "description": "Rules to enforce on matching refs",
+              "items": {
+                "$ref": "#/definitions/rulesetRule"
+              }
+            },
+            {
+              "$ref": "#/definitions/rulesArrayMergeDirective"
+            }
+          ]
         }
       }
     },
@@ -604,18 +1043,32 @@
           "description": "Ref name patterns to include/exclude",
           "properties": {
             "include": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Patterns to include (e.g., 'refs/heads/main', 'refs/heads/release/*')"
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Patterns to include (e.g., 'refs/heads/main', 'refs/heads/release/*')"
+                },
+                {
+                  "$ref": "#/definitions/arrayMergeDirective"
+                }
+              ]
             },
             "exclude": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Patterns to exclude from this ruleset"
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Patterns to exclude from this ruleset"
+                },
+                {
+                  "$ref": "#/definitions/arrayMergeDirective"
+                }
+              ]
             }
           }
         }
@@ -1199,6 +1652,42 @@
           }
         }
       }
+    },
+    "label": {
+      "type": "object",
+      "description": "GitHub label configuration",
+      "required": [
+        "color"
+      ],
+      "properties": {
+        "color": {
+          "type": "string",
+          "pattern": "^#?[0-9a-fA-F]{6}$",
+          "description": "Hex color code (with or without #). Example: 'd73a4a' or '#d73a4a'"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Label description (max 100 characters)"
+        },
+        "new_name": {
+          "type": "string",
+          "description": "Rename this label. Maps to GitHub API's new_name field."
+        }
+      }
+    },
+    "secretConfig": {
+      "type": "object",
+      "description": "Secret configuration mapping to an environment variable source",
+      "required": ["env"],
+      "properties": {
+        "env": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the environment variable containing the secret value"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

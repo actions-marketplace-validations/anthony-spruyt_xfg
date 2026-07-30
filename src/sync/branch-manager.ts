@@ -1,10 +1,22 @@
-import { getPRStrategy } from "../vcs/index.js";
+import { createPRStrategy } from "../vcs/index.js";
+import type { IPRStrategy } from "../vcs/index.js";
+import type { RepoInfo } from "../repo/index.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
+import type { DebugInfoWarnLog } from "../shared/logger.js";
 import type { IBranchManager, BranchSetupOptions } from "./types.js";
 
-/**
- * Handles branch creation and existing PR cleanup.
- */
+type PRStrategyFactory = (
+  repoInfo: RepoInfo,
+  executor: ICommandExecutor,
+  log?: DebugInfoWarnLog
+) => IPRStrategy;
+
 export class BranchManager implements IBranchManager {
+  constructor(
+    private readonly log: DebugInfoWarnLog,
+    private readonly prStrategyFactory: PRStrategyFactory = createPRStrategy
+  ) {}
+
   async setupBranch(options: BranchSetupOptions): Promise<void> {
     const {
       repoInfo,
@@ -16,22 +28,18 @@ export class BranchManager implements IBranchManager {
       retries,
       token,
       gitOps,
-      log,
       executor,
     } = options;
 
-    // Direct mode: stay on default branch, no PR cleanup needed
     if (isDirectMode) {
-      log.info(`Direct mode: staying on ${baseBranch}`);
+      this.log.debug(`Direct mode: staying on ${baseBranch}`);
       return;
     }
 
-    // Close existing PR if exists (fresh start approach)
-    // Skip for dry-run mode
     if (!dryRun) {
-      log.info("Checking for existing PR...");
-      const strategy = getPRStrategy(repoInfo, executor);
-      const closed = await strategy.closeExistingPR({
+      this.log.debug("Checking for existing PR...");
+      const strategy = this.prStrategyFactory(repoInfo, executor, this.log);
+      const closeResult = await strategy.closeExistingPR({
         repoInfo,
         branchName,
         baseBranch,
@@ -40,15 +48,15 @@ export class BranchManager implements IBranchManager {
         token,
       });
 
-      if (closed) {
-        log.info("Closed existing PR and deleted branch for fresh sync");
-        // Prune stale remote tracking refs so --force-with-lease works correctly
+      if (closeResult.status === "closed") {
+        this.log.info("Closed existing PR and deleted branch for fresh sync");
         await gitOps.fetch({ prune: true });
+      } else if (closeResult.status === "close_failed") {
+        this.log.warn(`Failed to close existing PR: ${closeResult.message}`);
       }
     }
 
-    // Create branch (always fresh from base branch)
-    log.info(`Creating branch: ${branchName}`);
+    this.log.debug(`Creating branch: ${branchName}`);
     await gitOps.createBranch(branchName);
   }
 }

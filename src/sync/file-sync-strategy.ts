@@ -1,7 +1,10 @@
-import type { RepoConfig } from "../config/types.js";
-import type { RepoInfo } from "../shared/repo-detector.js";
+import type { RepoConfig } from "../config/index.js";
+import type { RepoInfo } from "../repo/index.js";
+import type { FileAction } from "../vcs/index.js";
+import type { ActiveAction } from "../settings/index.js";
 import { formatCommitMessage } from "./commit-message.js";
 import type {
+  FileChangeDetail,
   IWorkStrategy,
   WorkResult,
   SessionContext,
@@ -35,11 +38,20 @@ export class FileSyncStrategy implements IWorkStrategy {
     }
 
     const fileChangeDetails = changedFiles
-      .filter((f) => f.action !== "skip")
-      .map((f) => ({
-        path: f.fileName,
-        action: f.action as "create" | "update" | "delete",
-      }));
+      .filter(
+        (f): f is FileAction & { action: ActiveAction } => f.action !== "skip"
+      )
+      .map((f) => {
+        const detail: FileChangeDetail = {
+          path: f.fileName,
+          action: f.action,
+        };
+        const writeResult = fileChanges.get(f.fileName);
+        if (writeResult?.diffLines) {
+          detail.diffLines = writeResult.diffLines;
+        }
+        return detail;
+      });
 
     return {
       fileChanges,

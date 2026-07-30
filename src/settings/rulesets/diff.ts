@@ -1,11 +1,12 @@
 import { RULESET_COMPARABLE_FIELDS, type Ruleset } from "../../config/index.js";
-import type { GitHubRuleset } from "./github-ruleset-strategy.js";
+import { MATCH_KEY_CANDIDATES, findMatchKey } from "../../config/merge.js";
+import { isPlainObject } from "../../shared/type-guards.js";
+import { camelToSnake } from "../../shared/string-utils.js";
+import { countActions, type SettingsAction } from "../base-processor.js";
+import { deepEqual } from "./diff-algorithm.js";
+import type { GitHubRuleset } from "./types.js";
 
-// =============================================================================
-// Types
-// =============================================================================
-
-export type RulesetAction = "create" | "update" | "delete" | "unchanged";
+export type RulesetAction = SettingsAction;
 
 export interface RulesetChange {
   action: RulesetAction;
@@ -13,17 +14,6 @@ export interface RulesetChange {
   rulesetId?: number;
   current?: GitHubRuleset;
   desired?: Ruleset;
-}
-
-// =============================================================================
-// Normalization (for comparison)
-// =============================================================================
-
-/**
- * Converts camelCase to snake_case for comparison.
- */
-function camelToSnake(str: string): string {
-  return str.replace(/([A-Z])/g, "_$1").toLowerCase();
 }
 
 /**
@@ -90,50 +80,6 @@ function normalizeConfigRuleset(ruleset: Ruleset): Record<string, unknown> {
 }
 
 /**
- * Performs deep equality comparison of two normalized values.
- */
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) {
-    return true;
-  }
-
-  if (a === null || b === null || a === undefined || b === undefined) {
-    return a === b;
-  }
-
-  if (typeof a !== typeof b) {
-    return false;
-  }
-
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) {
-      return false;
-    }
-    return a.every((val, i) => deepEqual(val, b[i]));
-  }
-
-  if (typeof a === "object" && typeof b === "object") {
-    const objA = a as Record<string, unknown>;
-    const objB = b as Record<string, unknown>;
-
-    const keysA = Object.keys(objA);
-    const keysB = Object.keys(objB);
-
-    if (keysA.length !== keysB.length) {
-      return false;
-    }
-
-    return keysA.every((key) => deepEqual(objA[key], objB[key]));
-  }
-
-  return false;
-}
-
-// =============================================================================
-// Desired-Side Projection
-// =============================================================================
-
-/**
  * Projects `current` onto the shape of `desired`.
  * Only keeps keys/structure present in `desired`, filtering out API noise.
  * For arrays of objects, matches items by `type` field if present, else by index.
@@ -161,10 +107,6 @@ export function projectToDesiredShape(
 
   // Scalars — return current as-is
   return current;
-}
-
-function isPlainObject(val: unknown): val is Record<string, unknown> {
-  return val !== null && typeof val === "object" && !Array.isArray(val);
 }
 
 function projectObjects(
@@ -199,37 +141,53 @@ function projectArrays(current: unknown[], desired: unknown[]): unknown[] {
     return current;
   }
 
-  // Arrays of objects — match by `type` field if available
-  const hasType = desired.every(
-    (item) => isPlainObject(item) && "type" in (item as Record<string, unknown>)
-  );
+  // Arrays of objects — match by identifying key if available
+  const matchKey = findMatchKey(current, desired);
 
-  if (hasType) {
-    return matchByType(current, desired);
+  if (matchKey) {
+    return matchByKey(current, desired, matchKey);
   }
 
   // Fallback: match by index
   return matchByIndex(current, desired);
 }
 
-function matchByType(current: unknown[], desired: unknown[]): unknown[] {
-  const currentByType = new Map<string, unknown>();
+function matchByKey(
+  current: unknown[],
+  desired: unknown[],
+  key: string
+): unknown[] {
+  const currentByKey = new Map<unknown, unknown>();
   for (const item of current) {
     if (isPlainObject(item)) {
-      const type = (item as Record<string, unknown>).type as string;
-      if (type) currentByType.set(type, item);
+      const keyValue = (item as Record<string, unknown>)[key];
+      if (keyValue !== undefined) currentByKey.set(keyValue, item);
     }
   }
 
+  const desiredKeys = new Set<unknown>();
   const result: unknown[] = [];
   for (const desiredItem of desired) {
-    const type = (desiredItem as Record<string, unknown>).type as string;
-    const currentItem = currentByType.get(type);
+    const keyValue = (desiredItem as Record<string, unknown>)[key];
+    desiredKeys.add(keyValue);
+    const currentItem = currentByKey.get(keyValue);
     if (currentItem) {
       result.push(projectToDesiredShape(currentItem, desiredItem));
     }
     // If no match in current, skip — diff handles additions
   }
+
+  // Append current items not in desired — these are removals that
+  // deepEqual must detect (length mismatch). Fixes #549.
+  for (const item of current) {
+    if (isPlainObject(item)) {
+      const keyValue = (item as Record<string, unknown>)[key];
+      if (keyValue !== undefined && !desiredKeys.has(keyValue)) {
+        result.push(item);
+      }
+    }
+  }
+
   return result;
 }
 
@@ -238,29 +196,29 @@ function matchByIndex(current: unknown[], desired: unknown[]): unknown[] {
   for (let i = 0; i < Math.min(current.length, desired.length); i++) {
     result.push(projectToDesiredShape(current[i], desired[i]));
   }
+  // Append extra current items so deepEqual detects length mismatch (removals).
+  // Mirrors matchByKey behavior added for #549.
+  for (let i = desired.length; i < current.length; i++) {
+    result.push(current[i]);
+  }
   return result;
 }
-
-// =============================================================================
-// Diff Algorithm
-// =============================================================================
 
 /**
  * Compares current rulesets (from GitHub) with desired rulesets (from config).
  *
  * @param current - Current rulesets from GitHub API
  * @param desired - Desired rulesets from config (name → ruleset)
- * @param managedNames - Names of rulesets managed by xfg (from manifest)
+ * @param deleteOrphaned - When true, delete ALL current rulesets not in desired (desired-state model)
  * @returns Array of changes to apply
  */
 export function diffRulesets(
   current: GitHubRuleset[],
   desired: Map<string, Ruleset>,
-  managedNames: string[]
+  deleteOrphaned: boolean
 ): RulesetChange[] {
   const changes: RulesetChange[] = [];
   const currentByName = new Map(current.map((r) => [r.name, r]));
-  const managedSet = new Set(managedNames);
 
   // Check each desired ruleset
   for (const [name, desiredRuleset] of desired) {
@@ -302,11 +260,10 @@ export function diffRulesets(
     }
   }
 
-  // Check for orphaned rulesets (in manifest but not in desired config)
-  for (const name of managedSet) {
-    if (!desired.has(name)) {
-      const currentRuleset = currentByName.get(name);
-      if (currentRuleset) {
+  // Desired-state: delete ALL current rulesets not in desired when deleteOrphaned is true
+  if (deleteOrphaned) {
+    for (const [name, currentRuleset] of currentByName) {
+      if (!desired.has(name)) {
         changes.push({
           action: "delete",
           name,
@@ -327,10 +284,6 @@ export function diffRulesets(
 
   return changes.sort((a, b) => actionOrder[a.action] - actionOrder[b.action]);
 }
-
-// =============================================================================
-// Formatting
-// =============================================================================
 
 /**
  * Formats a ruleset change for display.
@@ -376,12 +329,7 @@ export function formatDiff(changes: RulesetChange[]): string {
   }
 
   // Summary
-  const counts = {
-    create: changes.filter((c) => c.action === "create").length,
-    update: changes.filter((c) => c.action === "update").length,
-    delete: changes.filter((c) => c.action === "delete").length,
-    unchanged: changes.filter((c) => c.action === "unchanged").length,
-  };
+  const counts = countActions(changes);
 
   lines.push("");
   lines.push("Summary:");

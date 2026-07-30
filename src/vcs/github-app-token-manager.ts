@@ -1,9 +1,10 @@
 import { createSign } from "node:crypto";
 import { withRetry } from "../shared/retry-utils.js";
-import type { GitHubRepoInfo } from "../shared/repo-detector.js";
+import { SyncError } from "../shared/errors.js";
+import type { GitHubRepoInfo } from "../repo/index.js";
 
 /** Duration to cache tokens (45 minutes in milliseconds) */
-export const TOKEN_CACHE_DURATION_MS = 45 * 60 * 1000;
+const TOKEN_CACHE_DURATION_MS = 45 * 60 * 1000;
 
 interface Installation {
   id: number;
@@ -22,12 +23,19 @@ interface CachedToken {
   expiresAt: number;
 }
 
+async function assertOkResponse(res: Response, context: string): Promise<void> {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new SyncError(`${context}: ${res.status}${body ? ` - ${body}` : ""}`);
+  }
+}
+
 /**
  * Manages GitHub App authentication tokens for multiple organizations.
  * Handles JWT generation, installation discovery, and token caching.
  */
 export class GitHubAppTokenManager {
-  private readonly appId: string;
+  private readonly clientId: string;
   private readonly privateKey: string;
 
   /** Map of "apiHost:owner" -> installation ID */
@@ -39,8 +47,8 @@ export class GitHubAppTokenManager {
   /** Map of "apiHost:owner" -> cached token */
   private tokenCache = new Map<string, CachedToken>();
 
-  constructor(appId: string, privateKey: string) {
-    this.appId = appId;
+  constructor(clientId: string, privateKey: string) {
+    this.clientId = clientId;
     this.privateKey = privateKey;
   }
 
@@ -59,7 +67,7 @@ export class GitHubAppTokenManager {
     const payload = {
       iat: now - 60, // Issued 60 seconds ago to account for clock drift
       exp: now + 600, // Expires in 10 minutes
-      iss: this.appId,
+      iss: this.clientId,
     };
 
     const encodedHeader = base64UrlEncode(JSON.stringify(header));
@@ -93,13 +101,7 @@ export class GitHubAppTokenManager {
         },
       });
 
-      if (!res.ok) {
-        const status = res.status;
-        // Throw error with status code for retry logic
-        const error = new Error(`GitHub API error: ${status}`);
-        throw error;
-      }
-
+      await assertOkResponse(res, "GitHub App installations");
       return res;
     });
 
@@ -113,10 +115,6 @@ export class GitHubAppTokenManager {
     this.discoveredHosts.add(apiHost);
   }
 
-  /**
-   * Gets the installation ID for a given owner on the specified API host.
-   * Returns undefined if no installation is found.
-   */
   getInstallationId(apiHost: string, owner: string): number | undefined {
     const key = `${apiHost}:${owner}`;
     return this.installations.get(key);
@@ -158,12 +156,7 @@ export class GitHubAppTokenManager {
         },
       });
 
-      if (!res.ok) {
-        const status = res.status;
-        const error = new Error(`GitHub API error: ${status}`);
-        throw error;
-      }
-
+      await assertOkResponse(res, "GitHub App access token");
       return res;
     });
 

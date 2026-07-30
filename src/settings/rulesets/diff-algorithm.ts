@@ -1,8 +1,4 @@
-// src/settings/rulesets/diff-algorithm.ts
-
-// =============================================================================
-// Types
-// =============================================================================
+import { isPlainObject } from "../../shared/type-guards.js";
 
 export type DiffAction = "add" | "change" | "remove";
 
@@ -13,18 +9,10 @@ export interface PropertyDiff {
   newValue?: unknown;
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
-export function isObject(val: unknown): val is Record<string, unknown> {
-  return val !== null && typeof val === "object" && !Array.isArray(val);
-}
-
 export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || b === null || a === undefined || b === undefined)
-    return a === b;
+    return false;
   if (typeof a !== typeof b) return false;
 
   if (Array.isArray(a) && Array.isArray(b)) {
@@ -32,7 +20,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     return a.every((val, i) => deepEqual(val, b[i]));
   }
 
-  if (isObject(a) && isObject(b)) {
+  if (isPlainObject(a) && isPlainObject(b)) {
     const keysA = Object.keys(a);
     const keysB = Object.keys(b);
     if (keysA.length !== keysB.length) return false;
@@ -43,12 +31,8 @@ export function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 export function isArrayOfObjects(arr: unknown[]): boolean {
-  return arr.length > 0 && arr.every((item) => isObject(item));
+  return arr.length > 0 && arr.every((item) => isPlainObject(item));
 }
-
-// =============================================================================
-// Property Diff Algorithm
-// =============================================================================
 
 /**
  * Recursively compute property-level diffs between two objects.
@@ -74,7 +58,7 @@ export function computePropertyDiffs(
       diffs.push({ path, action: "remove", oldValue: currentVal });
     } else if (!deepEqual(currentVal, desiredVal)) {
       // Changed property
-      if (isObject(currentVal) && isObject(desiredVal)) {
+      if (isPlainObject(currentVal) && isPlainObject(desiredVal)) {
         // Recurse into nested objects
         diffs.push(
           ...computePropertyDiffs(
@@ -106,14 +90,10 @@ export function computePropertyDiffs(
   return diffs;
 }
 
-// =============================================================================
-// Array Diffing
-// =============================================================================
-
 /**
  * Diff two arrays of objects by matching items on `type` field (or by index).
  */
-export function diffObjectArrays(
+function diffObjectArrays(
   currentArr: unknown[],
   desiredArr: unknown[],
   parentPath: string[]
@@ -121,7 +101,7 @@ export function diffObjectArrays(
   const diffs: PropertyDiff[] = [];
 
   const hasType = desiredArr.every(
-    (item) => isObject(item) && "type" in (item as Record<string, unknown>)
+    (item) => isPlainObject(item) && "type" in (item as Record<string, unknown>)
   );
 
   if (hasType) {
@@ -132,7 +112,8 @@ export function diffObjectArrays(
     >();
     for (let i = 0; i < currentArr.length; i++) {
       const item = currentArr[i] as Record<string, unknown>;
-      const type = item.type as string;
+      const type =
+        typeof item.type === "string" ? item.type : String(item.type ?? "");
       if (type) currentByType.set(type, { item, index: i });
     }
 
@@ -140,7 +121,10 @@ export function diffObjectArrays(
 
     for (let i = 0; i < desiredArr.length; i++) {
       const desiredItem = desiredArr[i] as Record<string, unknown>;
-      const type = desiredItem.type as string;
+      const type =
+        typeof desiredItem.type === "string"
+          ? desiredItem.type
+          : String(desiredItem.type ?? "");
       const label = `[${i}] (${type})`;
       const currentEntry = currentByType.get(type);
 
@@ -189,7 +173,7 @@ export function diffObjectArrays(
           action: "remove",
           oldValue: currentArr[i],
         });
-      } else if (isObject(currentArr[i]) && isObject(desiredArr[i])) {
+      } else if (isPlainObject(currentArr[i]) && isPlainObject(desiredArr[i])) {
         const itemDiffs = computePropertyDiffs(
           currentArr[i] as Record<string, unknown>,
           desiredArr[i] as Record<string, unknown>,

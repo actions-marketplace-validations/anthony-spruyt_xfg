@@ -5,12 +5,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   exec,
+  execWithRetry,
   projectRoot,
   generateRepoName,
   deleteRepo,
   repoExists,
+  repoExistsNoRetry,
   isForkedFrom,
   writeConfig,
+  withTestRetry,
 } from "./test-helpers.js";
 
 const OWNER = "spruyt-labs";
@@ -26,9 +29,9 @@ describe("Lifecycle Integration Test (PAT)", () => {
     mkdirSync(tmpDir, { recursive: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const repoName of reposToDelete) {
-      deleteRepo(OWNER, repoName);
+      await deleteRepo(OWNER, repoName);
     }
     reposToDelete.length = 0;
   });
@@ -54,7 +57,7 @@ repos:
     );
 
     console.log(`\nCreating repo ${OWNER}/${repoName} via xfg sync...`);
-    const output = exec(
+    const output = await exec(
       `node dist/cli.js sync --config ${configPath} --merge direct`,
       { cwd: projectRoot }
     );
@@ -62,20 +65,25 @@ repos:
 
     // Verify repo was created
     assert.ok(
-      repoExists(OWNER, repoName),
+      await repoExists(OWNER, repoName),
       `Repo ${repoName} should exist after sync`
     );
 
-    // Verify file was pushed
-    const fileContent = exec(
-      `gh api repos/${OWNER}/${repoName}/contents/lifecycle-test.json --jq '.content' | base64 -d`
+    await withTestRetry(
+      async () => {
+        const fileContent = await execWithRetry(
+          `gh api repos/${OWNER}/${repoName}/contents/lifecycle-test.json --jq '.content' | base64 -d`
+        );
+        assert.ok(fileContent, "lifecycle-test.json should exist");
+        const json = JSON.parse(fileContent);
+        assert.equal(json.created, true, "File should contain created: true");
+      },
+      {
+        description: "file visible on default branch",
+        retries: 5,
+        baseDelayMs: 3000,
+      }
     );
-    assert.ok(
-      fileContent,
-      "lifecycle-test.json should exist on default branch"
-    );
-    const json = JSON.parse(fileContent);
-    assert.equal(json.created, true, "File should contain created: true");
 
     console.log("  Create lifecycle test passed");
   });
@@ -100,7 +108,7 @@ repos:
     console.log(
       `\nForking ${FORK_SOURCE} as ${OWNER}/${repoName} via xfg sync...`
     );
-    const output = exec(
+    const output = await exec(
       `node dist/cli.js sync --config ${configPath} --merge direct`,
       { cwd: projectRoot }
     );
@@ -108,13 +116,13 @@ repos:
 
     // Verify repo was created
     assert.ok(
-      repoExists(OWNER, repoName),
+      await repoExists(OWNER, repoName),
       `Repo ${repoName} should exist after sync`
     );
 
     // Verify it's a fork of the source
     assert.ok(
-      isForkedFrom(OWNER, repoName, FORK_SOURCE),
+      await isForkedFrom(OWNER, repoName, FORK_SOURCE),
       `Repo ${repoName} should be a fork of ${FORK_SOURCE}`
     );
 
@@ -138,7 +146,7 @@ repos:
     );
 
     console.log(`\nDry-run create for ${OWNER}/${repoName} via xfg sync...`);
-    const output = exec(
+    const output = await exec(
       `node dist/cli.js sync --config ${configPath} --dry-run`,
       { cwd: projectRoot }
     );
@@ -152,7 +160,7 @@ repos:
 
     // Verify repo was NOT actually created
     assert.ok(
-      !repoExists(OWNER, repoName),
+      !(await repoExistsNoRetry(OWNER, repoName)),
       `Repo ${repoName} should NOT exist after dry-run`
     );
 
@@ -184,7 +192,7 @@ repos:
       );
       // Note: exec() here uses controlled test constants (repoName from randomBytes,
       // configPath from tmpDir), not user input. This is the standard integration test pattern.
-      const output = exec(
+      const output = await exec(
         `node dist/cli.js sync --config ${configPath} --merge direct`,
         { cwd: projectRoot }
       );
@@ -192,13 +200,13 @@ repos:
 
       // Verify repo was created
       assert.ok(
-        repoExists(OWNER, repoName),
+        await repoExists(OWNER, repoName),
         `Repo ${repoName} should exist after migrate`
       );
 
       // Verify it's NOT a fork (migrated repos are standalone)
       assert.ok(
-        !isForkedFrom(OWNER, repoName, "aspruyt/fxg-test"),
+        !(await isForkedFrom(OWNER, repoName, "aspruyt/fxg-test")),
         `Repo ${repoName} should not be a fork`
       );
 
@@ -228,7 +236,7 @@ repos:
     console.log(
       `\nCreating repo ${OWNER}/${repoName} with settings via xfg sync...`
     );
-    const output = exec(
+    const output = await exec(
       `node dist/cli.js sync --config ${configPath} --merge direct`,
       { cwd: projectRoot }
     );
@@ -236,22 +244,135 @@ repos:
 
     // Verify repo was created
     assert.ok(
-      repoExists(OWNER, repoName),
+      await repoExists(OWNER, repoName),
       `Repo ${repoName} should exist after sync`
     );
 
-    // Verify description was applied
-    const description = exec(
-      `gh api repos/${OWNER}/${repoName} --jq '.description'`
-    );
-    assert.equal(
-      description,
-      "Created by xfg lifecycle test",
-      "Repo description should match config"
+    await withTestRetry(
+      async () => {
+        const description = await execWithRetry(
+          `gh api repos/${OWNER}/${repoName} --jq '.description'`
+        );
+        assert.equal(
+          description,
+          "Created by xfg lifecycle test",
+          "Repo description should match config"
+        );
+      },
+      { description: "description applied", retries: 5, baseDelayMs: 3000 }
     );
 
     console.log("  Create with settings test passed");
   });
+
+  test("create with defaultBranch: renames default branch to desired name", async () => {
+    const repoName = generateRepoName();
+    reposToDelete.push(repoName);
+
+    const configPath = writeConfig(
+      tmpDir,
+      `id: lifecycle-create-defaultbranch-test
+settings:
+  repo:
+    defaultBranch: develop
+files:
+  lifecycle-test.json:
+    content:
+      created: true
+repos:
+  - git: https://github.com/${OWNER}/${repoName}.git
+`
+    );
+
+    console.log(
+      `\nCreating repo ${OWNER}/${repoName} with defaultBranch: develop via xfg sync...`
+    );
+    // Note: uses controlled test constants (repoName from randomBytes,
+    // configPath from tmpDir), not user input. Standard integration test pattern.
+    const output = await exec(
+      `node dist/cli.js sync --config ${configPath} --merge direct`,
+      { cwd: projectRoot }
+    );
+    console.log(output);
+
+    assert.ok(
+      await repoExists(OWNER, repoName),
+      `Repo ${repoName} should exist after sync`
+    );
+
+    await withTestRetry(
+      async () => {
+        const defaultBranch = await execWithRetry(
+          `gh api repos/${OWNER}/${repoName} --jq '.default_branch'`
+        );
+        assert.equal(
+          defaultBranch,
+          "develop",
+          "Default branch should be 'develop'"
+        );
+      },
+      { description: "default branch renamed", retries: 5, baseDelayMs: 3000 }
+    );
+
+    console.log("  Create with defaultBranch test passed");
+  });
+
+  test(
+    "migrate with defaultBranch: renames master to main during migration",
+    { skip: !HAS_ADO_CREDS },
+    async () => {
+      const repoName = generateRepoName();
+      reposToDelete.push(repoName);
+
+      const configPath = writeConfig(
+        tmpDir,
+        `id: lifecycle-migrate-defaultbranch-test
+settings:
+  repo:
+    defaultBranch: main
+files:
+  lifecycle-migrate-test.json:
+    content:
+      migrated: true
+repos:
+  - git: https://github.com/${OWNER}/${repoName}.git
+    source: ${ADO_MIGRATE_SOURCE}
+`
+      );
+
+      console.log(
+        `\nMigrating from ADO to ${OWNER}/${repoName} with defaultBranch: main...`
+      );
+      // Note: uses controlled test constants (repoName from randomBytes,
+      // configPath from tmpDir), not user input. Standard integration test pattern.
+      const output = await exec(
+        `node dist/cli.js sync --config ${configPath} --merge direct`,
+        { cwd: projectRoot }
+      );
+      console.log(output);
+
+      assert.ok(
+        await repoExists(OWNER, repoName),
+        `Repo ${repoName} should exist after migrate`
+      );
+
+      await withTestRetry(
+        async () => {
+          const defaultBranch = await execWithRetry(
+            `gh api repos/${OWNER}/${repoName} --jq '.default_branch'`
+          );
+          assert.equal(
+            defaultBranch,
+            "main",
+            "Default branch should be 'main' after rename"
+          );
+        },
+        { description: "default branch renamed", retries: 5, baseDelayMs: 3000 }
+      );
+
+      console.log("  Migrate with defaultBranch test passed");
+    }
+  );
 
   test("already-existing repo: second sync shows existed", async () => {
     const repoName = generateRepoName();
@@ -270,7 +391,7 @@ repos:
     );
 
     console.log(`\nFirst sync: creating ${OWNER}/${repoName}...`);
-    const firstOutput = exec(
+    const firstOutput = await exec(
       `node dist/cli.js sync --config ${configPath} --merge direct`,
       { cwd: projectRoot }
     );
@@ -296,7 +417,7 @@ repos:
     );
 
     console.log(`\nSecond sync: ${OWNER}/${repoName} should already exist...`);
-    const secondOutput = exec(
+    const secondOutput = await exec(
       `node dist/cli.js sync --config ${configPath2} --merge direct`,
       { cwd: projectRoot }
     );
@@ -329,7 +450,7 @@ repos:
     );
 
     console.log(`\nDry-run fork for ${OWNER}/${repoName} via xfg sync...`);
-    const output = exec(
+    const output = await exec(
       `node dist/cli.js sync --config ${configPath} --dry-run`,
       { cwd: projectRoot }
     );
@@ -340,7 +461,7 @@ repos:
 
     // Verify repo was NOT actually created
     assert.ok(
-      !repoExists(OWNER, repoName),
+      !(await repoExistsNoRetry(OWNER, repoName)),
       `Repo ${repoName} should NOT exist after dry-run`
     );
 
@@ -368,7 +489,7 @@ repos:
       );
 
       console.log(`\nDry-run migrate for ${OWNER}/${repoName} via xfg sync...`);
-      const output = exec(
+      const output = await exec(
         `node dist/cli.js sync --config ${configPath} --dry-run`,
         { cwd: projectRoot }
       );
@@ -382,7 +503,7 @@ repos:
 
       // Verify repo was NOT actually created
       assert.ok(
-        !repoExists(OWNER, repoName),
+        !(await repoExistsNoRetry(OWNER, repoName)),
         `Repo ${repoName} should NOT exist after dry-run`
       );
 

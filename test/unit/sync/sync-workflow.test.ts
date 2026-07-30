@@ -14,10 +14,11 @@ import type {
   WorkResult,
 } from "../../../src/sync/index.js";
 import type { RepoConfig } from "../../../src/config/index.js";
-import type { GitHubRepoInfo } from "../../../src/shared/repo-detector.js";
+import type { GitHubRepoInfo } from "../../../src/repo/index.js";
 import {
   createMockLogger,
   createMockAuthenticatedGitOps,
+  createMockExecutor,
 } from "../../mocks/index.js";
 
 describe("SyncWorkflow", () => {
@@ -47,24 +48,34 @@ describe("SyncWorkflow", () => {
   });
 
   function createMockComponents() {
-    const { mock: mockGitOps } = createMockAuthenticatedGitOps({
+    const { gitOps } = createMockAuthenticatedGitOps({
       hasChanges: true,
     });
-    let cleanupCalled = false;
+    const callOrder: string[] = [];
 
     const authOptionsBuilder: IAuthOptionsBuilder = {
       async resolve() {
-        return { token: "test-token", authOptions: {} };
+        return {
+          ok: true,
+          token: "test-token",
+          authOptions: {
+            token: "test-token",
+            host: "github.com",
+            owner: "test",
+            repo: "repo",
+          },
+        };
       },
     };
 
     const repositorySession: IRepositorySession = {
       async setup() {
+        callOrder.push("session.setup");
         return {
-          gitOps: mockGitOps,
+          gitOps,
           baseBranch: "main",
           cleanup: () => {
-            cleanupCalled = true;
+            callOrder.push("session.cleanup");
           },
         };
       },
@@ -97,13 +108,14 @@ describe("SyncWorkflow", () => {
       branchManager,
       commitPushManager,
       prMergeHandler,
-      wasCleanupCalled: () => cleanupCalled,
+      callOrder,
     };
   }
 
   test("returns skip result when auth fails", async () => {
     const components = createMockComponents();
     components.authOptionsBuilder.resolve = async () => ({
+      ok: false as const,
       skipResult: {
         success: true,
         repoName: "test/repo",
@@ -131,7 +143,12 @@ describe("SyncWorkflow", () => {
     const result = await workflow.execute(
       mockRepoConfig,
       mockRepoInfo,
-      { branchName: "test", workDir, configId: "test" },
+      {
+        branchName: "test",
+        workDir,
+        configId: "test",
+        executor: createMockExecutor().mock,
+      },
       mockStrategy
     );
 
@@ -161,7 +178,12 @@ describe("SyncWorkflow", () => {
     const result = await workflow.execute(
       mockRepoConfig,
       mockRepoInfo,
-      { branchName: "test", workDir, configId: "test" },
+      {
+        branchName: "test",
+        workDir,
+        configId: "test",
+        executor: createMockExecutor().mock,
+      },
       mockStrategy
     );
 
@@ -203,7 +225,12 @@ describe("SyncWorkflow", () => {
     const result = await workflow.execute(
       mockRepoConfig,
       mockRepoInfo,
-      { branchName: "test", workDir, configId: "test" },
+      {
+        branchName: "test",
+        workDir,
+        configId: "test",
+        executor: createMockExecutor().mock,
+      },
       mockStrategy
     );
 
@@ -250,7 +277,12 @@ describe("SyncWorkflow", () => {
     const result = await workflow.execute(
       repoConfigDirect,
       mockRepoInfo,
-      { branchName: "test", workDir, configId: "test" },
+      {
+        branchName: "test",
+        workDir,
+        configId: "test",
+        executor: createMockExecutor().mock,
+      },
       mockStrategy
     );
 
@@ -259,9 +291,61 @@ describe("SyncWorkflow", () => {
     assert.ok(messages.some((m) => m.includes("pushed directly")));
   });
 
-  test("logs warning when mergeStrategy set in direct mode", async () => {
+  // mergeStrategy-in-direct-mode warning moved to CLI layer (sync-command.ts)
+
+  test("cleanup runs after strategy execution even when strategy throws", async () => {
     const components = createMockComponents();
-    const { mock: mockLogger, messages } = createMockLogger();
+    const { mock: mockLogger } = createMockLogger();
+
+    const workflow = new SyncWorkflow(
+      components.authOptionsBuilder,
+      components.repositorySession,
+      components.branchManager,
+      components.commitPushManager,
+      components.prMergeHandler,
+      mockLogger
+    );
+
+    const mockStrategy: IWorkStrategy = {
+      async execute() {
+        components.callOrder.push("strategy.execute");
+        throw new Error("Intentional test error");
+      },
+    };
+
+    try {
+      await workflow.execute(
+        mockRepoConfig,
+        mockRepoInfo,
+        {
+          branchName: "test",
+          workDir,
+          configId: "test",
+          executor: createMockExecutor().mock,
+        },
+        mockStrategy
+      );
+    } catch {
+      // Expected error
+    }
+
+    assert.ok(
+      components.callOrder.includes("session.cleanup"),
+      "cleanup must be called even when strategy throws"
+    );
+    const setupIdx = components.callOrder.indexOf("session.setup");
+    const executeIdx = components.callOrder.indexOf("strategy.execute");
+    const cleanupIdx = components.callOrder.indexOf("session.cleanup");
+    assert.ok(setupIdx < executeIdx, "setup must precede strategy execution");
+    assert.ok(
+      executeIdx < cleanupIdx,
+      "cleanup must run after strategy execution"
+    );
+  });
+
+  test("cleanup runs after successful execution", async () => {
+    const components = createMockComponents();
+    const { mock: mockLogger } = createMockLogger();
 
     const workflow = new SyncWorkflow(
       components.authOptionsBuilder,
@@ -286,61 +370,34 @@ describe("SyncWorkflow", () => {
 
     const mockStrategy: IWorkStrategy = {
       async execute() {
+        components.callOrder.push("strategy.execute");
         return workResult;
       },
     };
 
-    const repoConfigDirectWithStrategy: RepoConfig = {
-      ...mockRepoConfig,
-      prOptions: { merge: "direct", mergeStrategy: "squash" },
-    };
-
     await workflow.execute(
-      repoConfigDirectWithStrategy,
+      mockRepoConfig,
       mockRepoInfo,
-      { branchName: "test", workDir, configId: "test" },
+      {
+        branchName: "test",
+        workDir,
+        configId: "test",
+        executor: createMockExecutor().mock,
+      },
       mockStrategy
     );
 
+    const setupIdx = components.callOrder.indexOf("session.setup");
+    const executeIdx = components.callOrder.indexOf("strategy.execute");
+    const cleanupIdx = components.callOrder.indexOf("session.cleanup");
+    assert.ok(setupIdx >= 0, "setup must be called");
+    assert.ok(executeIdx >= 0, "strategy must be called");
+    assert.ok(cleanupIdx >= 0, "cleanup must be called on success path");
+    assert.ok(setupIdx < executeIdx, "setup must precede strategy execution");
     assert.ok(
-      messages.some(
-        (m) => m.includes("mergeStrategy") && m.includes("ignored")
-      ),
-      `Expected warning about mergeStrategy being ignored, got: ${messages.join(", ")}`
+      executeIdx < cleanupIdx,
+      "cleanup must run after strategy execution"
     );
-  });
-
-  test("calls cleanup in finally block", async () => {
-    const components = createMockComponents();
-    const { mock: mockLogger } = createMockLogger();
-
-    const workflow = new SyncWorkflow(
-      components.authOptionsBuilder,
-      components.repositorySession,
-      components.branchManager,
-      components.commitPushManager,
-      components.prMergeHandler,
-      mockLogger
-    );
-
-    const mockStrategy: IWorkStrategy = {
-      async execute() {
-        throw new Error("Intentional test error");
-      },
-    };
-
-    try {
-      await workflow.execute(
-        mockRepoConfig,
-        mockRepoInfo,
-        { branchName: "test", workDir, configId: "test" },
-        mockStrategy
-      );
-    } catch {
-      // Expected error
-    }
-
-    assert.equal(components.wasCleanupCalled(), true);
   });
 
   test("returns skip when commit skipped (no changes after staging)", async () => {
@@ -366,7 +423,12 @@ describe("SyncWorkflow", () => {
       changedFiles: [],
       commitMessage: "test",
       fileChangeDetails: [],
-      diffStats: { additions: 0, deletions: 0, modifications: 0 },
+      diffStats: {
+        newCount: 0,
+        modifiedCount: 0,
+        unchangedCount: 0,
+        deletedCount: 0,
+      },
     };
 
     const mockStrategy: IWorkStrategy = {
@@ -378,7 +440,12 @@ describe("SyncWorkflow", () => {
     const result = await workflow.execute(
       mockRepoConfig,
       mockRepoInfo,
-      { branchName: "test", workDir, configId: "test" },
+      {
+        branchName: "test",
+        workDir,
+        configId: "test",
+        executor: createMockExecutor().mock,
+      },
       mockStrategy
     );
 

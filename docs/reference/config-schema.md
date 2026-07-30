@@ -37,19 +37,67 @@ Or configure in `.vscode/settings.json`:
 
 ### Root Object
 
-| Field            | Type        | Required | Description                                       |
-| ---------------- | ----------- | -------- | ------------------------------------------------- |
-| `id`             | `string`    | Yes      | Unique config identifier (alphanumeric, `-`, `_`) |
-| `files`          | `object`    | *        | Map of filenames to file configs                  |
-| `repos`          | `array`     | Yes      | List of repository configurations                 |
-| `settings`       | `object`    | *        | Repository settings (rulesets, etc.)              |
-| `prOptions`      | `PROptions` | No       | Global PR merge options                           |
-| `prTemplate`     | `string`    | No       | Custom PR body template                           |
-| `githubHosts`    | `array`     | No       | GitHub Enterprise Server hostnames                |
-| `deleteOrphaned` | `boolean`   | No       | Global default for orphan file deletion           |
+| Field               | Type        | Required | Description                                                        |
+| ------------------- | ----------- | -------- | ------------------------------------------------------------------ |
+| `id`                | `string`    | Yes      | Unique config identifier (alphanumeric, `-`, `_`)                  |
+| `files`             | `object`    | \*       | Map of filenames to file configs                                   |
+| `groups`            | `object`    | \*       | Named config groups referenced by repos                            |
+| `conditionalGroups` | `array`     | \*       | Groups that activate based on repo group membership                |
+| `repos`             | `array`     | Yes      | List of repository configurations                                  |
+| `settings`          | `object`    | \*       | Repository settings (rulesets, labels, variables, etc.)            |
+| `secrets`           | `object`    | No       | GitHub Actions secrets (root-level, synced via `xfg secrets sync`) |
+| `prOptions`         | `PROptions` | No       | Global PR merge options                                            |
+| `prTemplate`        | `string`    | No       | Custom PR body template                                            |
+| `githubHosts`       | `array`     | No       | GitHub Enterprise Server hostnames                                 |
+| `deleteOrphaned`    | `boolean`   | No       | Global default for orphan file deletion                            |
 
-!!! note "files/settings requirement"
-    At least one of `files` or `settings` must be present. The `sync` command requires `files`, while the `settings` command requires `settings`.
+!!! note "files/settings/groups requirement"
+    At least one of `files`, `settings`, `groups`, or `conditionalGroups` must be present. The `sync` command requires files defined in root `files`, in a group, or in a conditional group. The `settings` command requires `settings` at root, repo, group, or conditional group level.
+
+!!! tip "Multi-file directory config"
+    When passing a directory to `-c`, xfg recursively scans subdirectories for `.yaml` and `.yml` files. See [Multi-File Configuration](../configuration/multi-file.md) for ordering rules and constraints.
+
+### Settings Object
+
+The `settings` object (at root, group, or repo level) supports the following fields:
+
+| Field            | Type      | Description                                               |
+| ---------------- | --------- | --------------------------------------------------------- |
+| `rulesets`       | `object`  | GitHub rulesets keyed by name                             |
+| `repo`           | `object`  | GitHub repository settings                                |
+| `labels`         | `object`  | GitHub labels keyed by name                               |
+| `codeScanning`   | `object`  | GitHub code scanning default setup                        |
+| `variables`      | `object`  | GitHub Actions variables keyed by name (see below)        |
+| `deleteOrphaned` | `boolean` | Default for orphan deletion across all settings sub-types |
+
+#### Variables Field
+
+The `variables` field in `settings` maps variable names to their string values. Two special keys control behavior:
+
+| Key              | Type              | Description                                                                           |
+| ---------------- | ----------------- | ------------------------------------------------------------------------------------- |
+| `deleteOrphaned` | `boolean`         | Delete variables removed from config (independent of settings-level `deleteOrphaned`) |
+| `inherit`        | `boolean`         | Set to `false` to discard all inherited variables (per-repo/group only)               |
+| `VAR_NAME`       | `string \| false` | Variable value, or `false` to opt out of an inherited variable                        |
+
+See [GitHub Variables](../configuration/variables.md) for full details.
+
+### Secrets Object
+
+The `secrets` object is at the **root level** (not under `settings`) and is synced via `xfg secrets sync`, not `xfg sync`. It maps secret names to `SecretConfig` objects:
+
+| Field            | Type      | Description                                    |
+| ---------------- | --------- | ---------------------------------------------- |
+| `deleteOrphaned` | `boolean` | Delete secrets removed from config             |
+| `SECRET_NAME`    | `object`  | `SecretConfig` with an `env` field (see below) |
+
+#### SecretConfig
+
+| Field | Type     | Required | Description                                               |
+| ----- | -------- | -------- | --------------------------------------------------------- |
+| `env` | `string` | Yes      | Name of the environment variable holding the secret value |
+
+See [Secrets](../configuration/secrets.md) for full details.
 
 ### File Config
 
@@ -65,15 +113,46 @@ Or configure in `.vscode/settings.json`:
 | `vars`           | `object`              | No       | Custom template variables            |
 | `deleteOrphaned` | `boolean`             | No       | Track file for orphan deletion       |
 
+### Group Config
+
+| Field       | Type                 | Required | Description                                              |
+| ----------- | -------------------- | -------- | -------------------------------------------------------- |
+| `extends`   | `string \| string[]` | No       | Parent group name(s) to inherit from                     |
+| `files`     | `object`             | No       | Files defined or overridden by this group                |
+| `prOptions` | `PROptions`          | No       | PR options for repos using this group                    |
+| `settings`  | `object`             | No       | Settings for repos using this group (supports `inherit`) |
+
+Groups support `extends` (inherit from parent groups), `inherit: false` (discard accumulated files), `file: false` (remove a file), and full file config or override objects.
+
+### Conditional Group Config
+
+| Field       | Type        | Required | Description                                               |
+| ----------- | ----------- | -------- | --------------------------------------------------------- |
+| `when`      | `object`    | Yes      | Condition that determines when this group activates       |
+| `files`     | `object`    | No       | Files defined or overridden (same capabilities as groups) |
+| `prOptions` | `PROptions` | No       | PR options for matching repos                             |
+| `settings`  | `object`    | No       | Settings for matching repos (supports `inherit`)          |
+
+The `when` clause:
+
+| Field   | Type       | Required | Description                                   |
+| ------- | ---------- | -------- | --------------------------------------------- |
+| `allOf` | `string[]` | \*       | All listed groups must be present on the repo |
+| `anyOf` | `string[]` | \*       | At least one listed group must be present     |
+
+At least one of `allOf` or `anyOf` is required. When both are specified, both conditions must be satisfied. See [Groups — Conditional Groups](../configuration/groups.md#conditional-groups).
+
 ### Repo Config
 
-| Field       | Type           | Required | Description                                                 |
-| ----------- | -------------- | -------- | ----------------------------------------------------------- |
-| `git`       | `string/array` | Yes      | Git URL(s)                                                  |
-| `files`     | `object`       | No       | Per-repo file overrides                                     |
-| `prOptions` | `PROptions`    | No       | Per-repo PR options                                         |
-| `upstream`  | `string`       | No       | Fork from this URL if target doesn't exist                  |
-| `source`    | `string`       | No       | Migrate from this URL if target doesn't exist               |
+| Field       | Type           | Required | Description                                         |
+| ----------- | -------------- | -------- | --------------------------------------------------- |
+| `git`       | `string/array` | Yes      | Git URL(s)                                          |
+| `files`     | `object`       | No       | Per-repo file overrides                             |
+| `groups`    | `string[]`     | No       | Group names to apply (merged in order)              |
+| `settings`  | `object`       | No       | Per-repo settings (rulesets, labels, repo settings) |
+| `prOptions` | `PROptions`    | No       | Per-repo PR options                                 |
+| `upstream`  | `string`       | No       | Fork from this URL if target doesn't exist          |
+| `source`    | `string`       | No       | Migrate from this URL if target doesn't exist       |
 
 !!! note "`upstream` and `source` are mutually exclusive"
     See [Repo Lifecycle](../configuration/lifecycle.md) for details.
@@ -94,38 +173,25 @@ Or configure in `.vscode/settings.json`:
 
 ### PR Options
 
-| Field           | Type      | Default  | Description                           |
-| --------------- | --------- | -------- | ------------------------------------- |
-| `merge`         | `string`  | `auto`   | `manual`, `auto`, `force`             |
-| `mergeStrategy` | `string`  | `squash` | `merge`, `squash`, `rebase`           |
-| `deleteBranch`  | `boolean` | `true`   | Delete branch after merge             |
-| `bypassReason`  | `string`  | -        | Reason for bypass (Azure DevOps only) |
+| Field           | Type       | Default  | Description                                  |
+| --------------- | ---------- | -------- | -------------------------------------------- |
+| `merge`         | `string`   | `auto`   | `manual`, `auto`, `force`, `direct`          |
+| `mergeStrategy` | `string`   | `squash` | `merge`, `squash`, `rebase`                  |
+| `deleteBranch`  | `boolean`  | `true`   | Delete branch after merge                    |
+| `bypassReason`  | `string`   | -        | Reason for bypass (Azure DevOps only)        |
+| `labels`        | `string[]` | -        | Labels to apply to created PRs (GitHub only) |
+| `branch`        | `string`   | -        | Branch name for sync PRs                     |
 
 ## Validation
 
 The schema validates:
 
-- Required fields (`id`, `repos`, at least one of `files` or `settings`)
+- Required fields (`id`, `repos`, at least one of `files`, `settings`, or `groups`)
 - Command-specific requirements (see below)
 - Enum values (`mergeStrategy`, `merge`, etc.)
 - Content types (object for JSON/YAML, string/array for text files)
 - File path security (no path traversal in file references)
 
-### Command-Specific Requirements
+### Config Requirements
 
-| Command        | Required Fields                                    |
-| -------------- | -------------------------------------------------- |
-| `xfg sync`     | `files` with at least one file defined             |
-| `xfg settings` | `settings` with actionable config (e.g., rulesets) |
-
-If you run the wrong command for your config, you'll see a helpful error:
-
-```text
-# Running sync with a settings-only config:
-The 'sync' command requires a 'files' section with at least one file defined.
-To manage repository settings instead, use 'xfg settings'.
-
-# Running settings with a files-only config:
-The 'settings' command requires a 'settings' section at root level or in at least one repo.
-To sync files instead, use 'xfg sync'.
-```
+The `xfg sync` command accepts configs with files, settings, or both. At least one of `files`, `settings`, `groups`, or `conditionalGroups` must be present.

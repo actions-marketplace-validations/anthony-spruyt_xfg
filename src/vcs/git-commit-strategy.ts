@@ -1,10 +1,6 @@
 import type { ICommitStrategy, CommitOptions, CommitResult } from "./types.js";
-import {
-  ICommandExecutor,
-  defaultExecutor,
-} from "../shared/command-executor.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
 import { withRetry } from "../shared/retry-utils.js";
-import { escapeShellArg } from "../shared/shell-utils.js";
 
 /**
  * Git-based commit strategy using standard git commands (add, commit, push).
@@ -14,8 +10,8 @@ import { escapeShellArg } from "../shared/shell-utils.js";
 export class GitCommitStrategy implements ICommitStrategy {
   private executor: ICommandExecutor;
 
-  constructor(executor?: ICommandExecutor) {
-    this.executor = executor ?? defaultExecutor;
+  constructor(executor: ICommandExecutor) {
+    this.executor = executor;
   }
 
   /**
@@ -34,12 +30,11 @@ export class GitCommitStrategy implements ICommitStrategy {
       gitOps,
     } = options;
 
-    // Stage all changes
-    await this.executor.exec("git add -A", workDir);
-
     // Commit with the message (--no-verify to skip pre-commit hooks)
+    // Staging is handled by CommitPushManager before calling commit()
     await this.executor.exec(
-      `git commit --no-verify -m ${escapeShellArg(message)}`,
+      "git",
+      ["commit", "--no-verify", "-m", message],
       workDir
     );
 
@@ -48,15 +43,19 @@ export class GitCommitStrategy implements ICommitStrategy {
       await gitOps.push(branchName, { force });
     } else {
       // Fallback for non-authenticated scenarios (shouldn't happen in practice)
-      const forceFlag = force ? "--force-with-lease " : "";
-      const pushCommand = `git push ${forceFlag}-u origin ${escapeShellArg(branchName)}`;
-      await withRetry(() => this.executor.exec(pushCommand, workDir), {
+      const args = [
+        "push",
+        ...(force ? ["--force-with-lease"] : []),
+        "-u",
+        "origin",
+        branchName,
+      ];
+      await withRetry(() => this.executor.exec("git", args, workDir), {
         retries,
       });
     }
 
-    // Get the commit SHA
-    const sha = await this.executor.exec("git rev-parse HEAD", workDir);
+    const sha = await this.executor.exec("git", ["rev-parse", "HEAD"], workDir);
 
     return {
       sha: sha.trim(),

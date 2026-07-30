@@ -1,11 +1,13 @@
-import type {
-  SettingsReport,
-  RepoChanges,
-  SettingChange,
-  RulesetChange,
-} from "../output/settings-report.js";
-import type { RepoSettingsPlanEntry } from "../settings/repo-settings/formatter.js";
-import type { RulesetPlanEntry } from "../settings/rulesets/formatter.js";
+import type { SettingsReport, RepoChanges } from "../output/index.js";
+import {
+  type RepoSettingsPlanEntry,
+  type RulesetPlanEntry,
+  type LabelsPlanEntry,
+  type CodeScanningPlanEntry,
+  type VariablesPlanEntry,
+  countActions,
+  isActiveAction,
+} from "../settings/index.js";
 
 /**
  * Result from processing a repository's settings and rulesets.
@@ -23,6 +25,21 @@ export interface ProcessorResults {
       entries?: RulesetPlanEntry[];
     };
   };
+  labelsResult?: {
+    planOutput?: {
+      entries?: LabelsPlanEntry[];
+    };
+  };
+  codeScanningResult?: {
+    planOutput?: {
+      entries?: CodeScanningPlanEntry[];
+    };
+  };
+  variablesResult?: {
+    planOutput?: {
+      entries?: VariablesPlanEntry[];
+    };
+  };
   error?: string;
 }
 
@@ -31,8 +48,10 @@ export function buildSettingsReport(
 ): SettingsReport {
   const repos: RepoChanges[] = [];
   const totals = {
-    settings: { add: 0, change: 0 },
+    settings: { create: 0, update: 0 },
     rulesets: { create: 0, update: 0, delete: 0 },
+    labels: { create: 0, update: 0, delete: 0 },
+    variables: { create: 0, update: 0, delete: 0 },
   };
 
   for (const result of results) {
@@ -40,52 +59,87 @@ export function buildSettingsReport(
       repoName: result.repoName,
       settings: [],
       rulesets: [],
+      labels: [],
+      variables: [],
     };
 
-    // Convert settings processor output
     if (result.settingsResult?.planOutput?.entries) {
       for (const entry of result.settingsResult.planOutput.entries) {
-        // Skip settings where both values are undefined (no actual change)
-        if (entry.oldValue === undefined && entry.newValue === undefined) {
-          continue;
-        }
-        const settingChange: SettingChange = {
+        if (!isActiveAction(entry)) continue;
+        repoChanges.settings.push({
           name: entry.property,
           action: entry.action,
           oldValue: entry.oldValue,
           newValue: entry.newValue,
-        };
-        repoChanges.settings.push(settingChange);
-
-        if (entry.action === "add") {
-          totals.settings.add++;
-        } else {
-          totals.settings.change++;
-        }
+        });
       }
     }
 
-    // Convert ruleset processor output
+    if (result.codeScanningResult?.planOutput?.entries) {
+      for (const entry of result.codeScanningResult.planOutput.entries) {
+        if (!isActiveAction(entry)) continue;
+        repoChanges.settings.push({
+          name: `codeScanning.${entry.property}`,
+          action: entry.action,
+          oldValue: entry.oldValue,
+          newValue: entry.newValue ?? null,
+        });
+      }
+    }
+
+    if (repoChanges.settings.length > 0) {
+      const counts = countActions(repoChanges.settings);
+      totals.settings.create += counts.create;
+      totals.settings.update += counts.update;
+    }
+
     if (result.rulesetResult?.planOutput?.entries) {
       for (const entry of result.rulesetResult.planOutput.entries) {
-        if (entry.action === "unchanged") continue;
-
-        const rulesetChange: RulesetChange = {
+        if (!isActiveAction(entry)) continue;
+        repoChanges.rulesets.push({
           name: entry.name,
-          action: entry.action as "create" | "update" | "delete",
+          action: entry.action,
           propertyDiffs: entry.propertyDiffs,
           config: entry.config,
-        };
-        repoChanges.rulesets.push(rulesetChange);
-
-        if (entry.action === "create") {
-          totals.rulesets.create++;
-        } else if (entry.action === "update") {
-          totals.rulesets.update++;
-        } else if (entry.action === "delete") {
-          totals.rulesets.delete++;
-        }
+        });
       }
+      const counts = countActions(repoChanges.rulesets);
+      totals.rulesets.create += counts.create;
+      totals.rulesets.update += counts.update;
+      totals.rulesets.delete += counts.delete;
+    }
+
+    if (result.labelsResult?.planOutput?.entries) {
+      for (const entry of result.labelsResult.planOutput.entries) {
+        if (!isActiveAction(entry)) continue;
+        repoChanges.labels.push({
+          name: entry.name,
+          action: entry.action,
+          newName: entry.newName,
+          propertyChanges: entry.propertyChanges,
+          config: entry.config,
+        });
+      }
+      const counts = countActions(repoChanges.labels);
+      totals.labels.create += counts.create;
+      totals.labels.update += counts.update;
+      totals.labels.delete += counts.delete;
+    }
+
+    if (result.variablesResult?.planOutput?.entries) {
+      for (const entry of result.variablesResult.planOutput.entries) {
+        if (!isActiveAction(entry)) continue;
+        repoChanges.variables!.push({
+          name: entry.name,
+          action: entry.action,
+          oldValue: entry.oldValue,
+          newValue: entry.newValue,
+        });
+      }
+      const counts = countActions(repoChanges.variables!);
+      totals.variables.create += counts.create;
+      totals.variables.update += counts.update;
+      totals.variables.delete += counts.delete;
     }
 
     if (result.error) {

@@ -7,6 +7,7 @@ import {
   MANIFEST_FILENAME,
   type XfgManifest,
 } from "./manifest.js";
+import { computeUnifiedDiff, isBinaryFile } from "./diff-utils.js";
 import type {
   IManifestManager,
   OrphanProcessResult,
@@ -19,12 +20,19 @@ import type {
  * Handles manifest loading, saving, and orphan detection.
  */
 export class ManifestManager implements IManifestManager {
-  processOrphans(
+  constructor(
+    private readonly log?: {
+      debug(msg: string): void;
+      warn(msg: string): void;
+    }
+  ) {}
+
+  detectOrphans(
     workDir: string,
     configId: string,
     filesWithDeleteOrphaned: Map<string, boolean | undefined>
   ): OrphanProcessResult {
-    const existingManifest = loadManifest(workDir);
+    const existingManifest = loadManifest(workDir, this.log);
 
     const { manifest, filesToDelete } = updateManifest(
       existingManifest,
@@ -32,14 +40,14 @@ export class ManifestManager implements IManifestManager {
       filesWithDeleteOrphaned
     );
 
-    return { manifest, filesToDelete };
+    return { manifest, existingManifest, filesToDelete };
   }
 
-  async deleteOrphans(
+  deleteOrphans(
     filesToDelete: string[],
     options: OrphanDeleteOptions,
     deps: OrphanDeleteDeps
-  ): Promise<void> {
+  ): void {
     const { dryRun, noDelete } = options;
     const { gitOps, log, fileChanges } = deps;
 
@@ -60,11 +68,20 @@ export class ManifestManager implements IManifestManager {
         continue;
       }
 
-      fileChanges.set(fileName, {
+      const writeResult: FileWriteResult = {
         fileName,
         content: null,
         action: "delete",
-      });
+      };
+
+      if (!isBinaryFile(fileName)) {
+        const existingContent = gitOps.getFileContent(fileName);
+        if (existingContent !== null) {
+          writeResult.diffLines = computeUnifiedDiff(existingContent, null);
+        }
+      }
+
+      fileChanges.set(fileName, writeResult);
 
       if (dryRun) {
         log.fileDiff(fileName, "DELETED", []);
@@ -99,11 +116,22 @@ export class ManifestManager implements IManifestManager {
     const manifestExisted = existsSync(join(workDir, MANIFEST_FILENAME));
     const manifestContent = JSON.stringify(manifest, null, 2) + "\n";
 
-    fileChanges.set(MANIFEST_FILENAME, {
+    const writeResult: FileWriteResult = {
       fileName: MANIFEST_FILENAME,
       content: manifestContent,
       action: manifestExisted ? "update" : "create",
-    });
+    };
+
+    // Compute diff for the manifest (it's a JSON file)
+    const oldManifestContent = existingManifest
+      ? JSON.stringify(existingManifest, null, 2) + "\n"
+      : null;
+    writeResult.diffLines = computeUnifiedDiff(
+      oldManifestContent,
+      manifestContent
+    );
+
+    fileChanges.set(MANIFEST_FILENAME, writeResult);
 
     if (!dryRun) {
       saveManifest(workDir, manifest);

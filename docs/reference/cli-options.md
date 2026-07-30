@@ -1,43 +1,36 @@
 # CLI Options Reference
 
-xfg uses subcommands to separate file sync (`sync`) from repository settings management (`settings`).
-
-## Subcommands
-
-| Command        | Description                                      |
-| -------------- | ------------------------------------------------ |
-| `xfg sync`     | Sync configuration files across repositories     |
-| `xfg settings` | Manage GitHub repository settings and rulesets   |
+xfg uses a `sync` command to handle file synchronization, repository settings, rulesets, labels, and variables. A separate `secrets sync` command handles secret management.
 
 ## Sync Command
 
-Sync configuration files across repositories.
+Sync configuration files, repository settings, rulesets, labels, and variables across repositories.
 
 ```bash
 xfg sync --config <path> [options]
 ```
 
-!!! warning "Config Requirement"
-    The sync command requires a `files` section with at least one file defined. If your config only has `settings`, use `xfg settings` instead.
+### Options
 
-### Sync Options
+| Option             | Alias | Description                                                               | Default                                        |
+| ------------------ | ----- | ------------------------------------------------------------------------- | ---------------------------------------------- |
+| `--config`         | `-c`  | Path to YAML config file                                                  | **Required**                                   |
+| `--dry-run`        | `-d`  | Show what would be done without making changes                            | `false`                                        |
+| `--work-dir`       | `-w`  | Temporary directory for cloning                                           | `./tmp`                                        |
+| `--retries`        | `-r`  | Number of retries for network operations                                  | `3`                                            |
+| `--branch`         | `-b`  | Override branch name                                                      | `chore/sync-{filename}` or `chore/sync-config` |
+| `--merge`          | `-m`  | PR merge mode: `manual`, `auto`, `force`, `direct`                        | `auto`                                         |
+| `--merge-strategy` |       | Merge strategy: `merge`, `squash`, `rebase`                               | `squash`                                       |
+| `--delete-branch`  |       | Delete source branch after merge                                          | `true`                                         |
+| `--no-delete`      |       | Skip deletion of orphaned files, rulesets, labels, variables, and secrets | `false`                                        |
 
-| Option             | Alias | Description                                        | Default                                        |
-| ------------------ | ----- | -------------------------------------------------- | ---------------------------------------------- |
-| `--config`         | `-c`  | Path to YAML config file                           | **Required**                                   |
-| `--dry-run`        | `-d`  | Show what would be done without making changes     | `false`                                        |
-| `--work-dir`       | `-w`  | Temporary directory for cloning                    | `./tmp`                                        |
-| `--retries`        | `-r`  | Number of retries for network operations           | `3`                                            |
-| `--branch`         | `-b`  | Override branch name                               | `chore/sync-{filename}` or `chore/sync-config` |
-| `--merge`          | `-m`  | PR merge mode: `manual`, `auto`, `force`, `direct` | `auto`                                         |
-| `--merge-strategy` |       | Merge strategy: `merge`, `squash`, `rebase`        | `squash`                                       |
-| `--delete-branch`  |       | Delete source branch after merge                   | `true`                                         |
-| `--no-delete`      |       | Skip deletion of orphaned files even if configured | `false`                                        |
+!!! note "GitHub-Only Settings"
+    Repository settings, rulesets, labels, and variables management only works with GitHub repositories. Azure DevOps and GitLab repos are skipped for settings.
 
-### Sync Examples
+### Examples
 
 ```bash
-# Basic sync
+# Basic sync (files + settings)
 xfg sync --config ./config.yaml
 
 # Dry run
@@ -55,44 +48,7 @@ xfg sync --config ./config.yaml --merge direct   # Push directly
 xfg sync --config ./config.yaml --no-delete
 ```
 
-## Settings Command
-
-Manage GitHub repository settings and rulesets. Updates repository configuration and creates, updates, or deletes rulesets to match your config.
-
-```bash
-xfg settings --config <path> [options]
-```
-
-!!! warning "Config Requirement"
-    The settings command requires a `settings` section with actionable configuration (e.g., rulesets). If your config only has `files`, use `xfg sync` instead.
-
-!!! note "GitHub-Only"
-    The settings command only works with GitHub repositories. Azure DevOps and GitLab repos are skipped.
-
-### Settings Options
-
-| Option        | Alias | Description                                             | Default      |
-| ------------- | ----- | ------------------------------------------------------- | ------------ |
-| `--config`    | `-c`  | Path to YAML config file                                | **Required** |
-| `--dry-run`   | `-d`  | Show what would be done without making changes          | `false`      |
-| `--work-dir`  | `-w`  | Temporary directory (not used for settings, but shared) | `./tmp`      |
-| `--retries`   | `-r`  | Number of retries for network operations                | `3`          |
-| `--no-delete` |       | Skip deletion of orphaned rulesets                      | `false`      |
-
-### Settings Examples
-
-```bash
-# Apply rulesets
-xfg settings --config ./config.yaml
-
-# Preview changes
-xfg settings --config ./config.yaml --dry-run
-
-# Apply without deleting orphans
-xfg settings --config ./config.yaml --no-delete
-```
-
-### Settings Output
+### Output
 
 ```text
 Loading config from: ./config.yaml
@@ -111,17 +67,56 @@ Found 3 repositories with rulesets
 Completed: 3 succeeded, 0 skipped, 0 failed
 ```
 
-## Combined Workflow
+## Secrets Sync Command
 
-Run both commands together:
+Sync GitHub Actions secrets to target repositories. Secret values are read from environment variables at runtime and encrypted with libsodium before upload.
 
 ```bash
-# Sync files and apply rulesets
-xfg sync -c config.yaml && xfg settings -c config.yaml
+xfg secrets sync --config <path> [options]
+```
 
-# Preview both
-xfg sync -c config.yaml --dry-run
-xfg settings -c config.yaml --dry-run
+### Secrets Options
+
+| Option        | Alias | Description                                                              | Default      |
+| ------------- | ----- | ------------------------------------------------------------------------ | ------------ |
+| `--config`    | `-c`  | Path to YAML config file                                                 | **Required** |
+| `--dry-run`   | `-d`  | Show what would be done without making changes                           | `false`      |
+| `--work-dir`  | `-w`  | Temporary directory for cloning                                          | `./tmp`      |
+| `--retries`   | `-r`  | Number of retries for network operations                                 | `3`          |
+| `--no-delete` |       | Skip deletion of orphaned secrets even if `deleteOrphaned` is configured | `false`      |
+
+!!! note "GitHub-Only"
+    Secrets management only works with GitHub repositories. Non-GitHub repos are skipped.
+
+### Secrets Examples
+
+```bash
+# Dry run (preview changes)
+MY_SECRET=value xfg secrets sync --config ./config.yaml --dry-run
+
+# Apply secrets
+MY_SECRET=value xfg secrets sync --config ./config.yaml
+
+# Skip orphan deletion
+MY_SECRET=value xfg secrets sync --config ./config.yaml --no-delete
+```
+
+### Secrets Output
+
+```text
+[1/2] your-org/frontend: Secrets
+  + MY_API_KEY
+  + DATABASE_URL
+
+[1/2] ✓ your-org/frontend: Secrets: 2 created, 0 updated, 0 deleted
+
+[2/2] your-org/backend: Secrets
+  ~ DEPLOY_TOKEN (update)
+
+[2/2] ✓ your-org/backend: Secrets: 0 created, 1 updated, 0 deleted
+
+==================================================
+Completed: 2 succeeded, 0 skipped, 0 failed
 ```
 
 ## Priority Order
@@ -130,8 +125,10 @@ CLI flags override config file settings:
 
 1. CLI flags (highest priority)
 2. Per-repo settings (e.g., `prOptions`, `settings.rulesets`)
-3. Global settings
-4. Built-in defaults (lowest priority)
+3. Conditional group settings (applied in array order)
+4. Group settings (applied in order, later groups override earlier ones)
+5. Global settings
+6. Built-in defaults (lowest priority)
 
 ## Exit Codes
 

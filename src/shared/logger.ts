@@ -1,8 +1,32 @@
 import chalk from "chalk";
-import { FileStatus, formatStatusBadge } from "../sync/diff-utils.js";
+import { FileStatus, formatStatusBadge } from "./file-status.js";
+
+/** Minimal log interface: debug only. */
+export type DebugLog = { debug(msg: string): void };
+
+/** Log interface: debug + warn. */
+export type DebugWarnLog = {
+  debug(msg: string): void;
+  warn(msg: string): void;
+};
+
+/** Log interface: debug + info. */
+export type DebugInfoLog = {
+  debug(msg: string): void;
+  info(msg: string): void;
+};
+
+/** Log interface: debug + info + warn. */
+export type DebugInfoWarnLog = {
+  debug(msg: string): void;
+  info(msg: string): void;
+  warn(msg: string): void;
+};
 
 export interface ILogger {
+  log(message: string): void;
   info(message: string): void;
+  warn(message: string): void;
   debug(message: string): void;
   fileDiff(fileName: string, status: FileStatus, diffLines: string[]): void;
   diffSummary(
@@ -12,13 +36,13 @@ export interface ILogger {
     deletedCount?: number
   ): void;
   setTotal(total: number): void;
-  progress(current: number, repoName: string, message: string): void;
-  success(current: number, repoName: string, message: string): void;
-  skip(current: number, repoName: string, reason: string): void;
-  error(current: number, repoName: string, error: string): void;
+  progress(repoNumber: number, repoName: string, message: string): void;
+  success(repoNumber: number, repoName: string, message: string): void;
+  skip(repoNumber: number, repoName: string, reason: string): void;
+  error(repoNumber: number, repoName: string, error: string): void;
 }
 
-export interface LoggerStats {
+interface LoggerStats {
   total: number;
   succeeded: number;
   failed: number;
@@ -26,6 +50,7 @@ export interface LoggerStats {
 }
 
 export class Logger implements ILogger {
+  private readonly debugEnabled: boolean;
   private stats: LoggerStats = {
     total: 0,
     succeeded: 0,
@@ -33,13 +58,21 @@ export class Logger implements ILogger {
     skipped: 0,
   };
 
+  constructor(debugEnabled?: boolean) {
+    this.debugEnabled = debugEnabled ?? false;
+  }
+
+  log(message: string): void {
+    console.log(message);
+  }
+
   setTotal(total: number): void {
     this.stats.total = total;
   }
 
-  progress(current: number, repoName: string, message: string): void {
+  progress(repoNumber: number, repoName: string, message: string): void {
     console.log(
-      chalk.blue(`[${current}/${this.stats.total}]`) +
+      chalk.blue(`[${repoNumber}/${this.stats.total}]`) +
         ` ${repoName}: ${message}`
     );
   }
@@ -48,32 +81,37 @@ export class Logger implements ILogger {
     console.log(chalk.gray(`    ${message}`));
   }
 
+  warn(message: string): void {
+    console.log(chalk.yellow(`    ⚠ ${message}`));
+  }
+
   debug(message: string): void {
-    if (process.env.DEBUG || process.env.XFG_DEBUG) {
+    if (this.debugEnabled) {
       console.log(chalk.dim(`    [debug] ${message}`));
     }
   }
 
-  success(current: number, repoName: string, message: string): void {
+  success(repoNumber: number, repoName: string, message: string): void {
     this.stats.succeeded++;
     console.log(
-      chalk.green(`[${current}/${this.stats.total}] ✓`) +
+      chalk.green(`[${repoNumber}/${this.stats.total}] ✓`) +
         ` ${repoName}: ${message}`
     );
   }
 
-  skip(current: number, repoName: string, reason: string): void {
+  skip(repoNumber: number, repoName: string, reason: string): void {
     this.stats.skipped++;
     console.log(
-      chalk.yellow(`[${current}/${this.stats.total}] ⊘`) +
+      chalk.yellow(`[${repoNumber}/${this.stats.total}] ⊘`) +
         ` ${repoName}: Skipped - ${reason}`
     );
   }
 
-  error(current: number, repoName: string, error: string): void {
+  error(repoNumber: number, repoName: string, error: string): void {
     this.stats.failed++;
     console.log(
-      chalk.red(`[${current}/${this.stats.total}] ✗`) + ` ${repoName}: ${error}`
+      chalk.red(`[${repoNumber}/${this.stats.total}] ✗`) +
+        ` ${repoName}: ${error}`
     );
   }
 
@@ -106,7 +144,7 @@ export class Logger implements ILogger {
     if (newCount > 0) parts.push(chalk.green(`${newCount} new`));
     if (modifiedCount > 0)
       parts.push(chalk.yellow(`${modifiedCount} modified`));
-    if (deletedCount && deletedCount > 0)
+    if ((deletedCount ?? 0) > 0)
       parts.push(chalk.red(`${deletedCount} deleted`));
     if (unchangedCount > 0)
       parts.push(chalk.gray(`${unchangedCount} unchanged`));
@@ -117,4 +155,5 @@ export class Logger implements ILogger {
   }
 }
 
-export const logger = new Logger();
+/** No-op debug logger for use as a fallback when logging is optional. */
+export const NO_OP_DEBUG_LOG: DebugLog = { debug() {} };

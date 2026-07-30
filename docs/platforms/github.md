@@ -136,7 +136,7 @@ This is useful for repos without branch protection or when PR review isn't requi
 
 ## GitHub Rulesets
 
-The `xfg settings` command manages GitHub Rulesets declaratively. See [GitHub Rulesets](../configuration/rulesets.md) for full documentation.
+The `xfg sync` command manages GitHub Rulesets declaratively. See [GitHub Rulesets](../configuration/rulesets.md) for full documentation.
 
 ```yaml
 settings:
@@ -154,7 +154,7 @@ settings:
 ```
 
 ```bash
-xfg settings --config ./config.yaml
+xfg sync --config ./config.yaml
 ```
 
 ### Required Permissions for Rulesets
@@ -175,3 +175,22 @@ GitHub Rulesets are the modern replacement for branch protection rules. They off
 - Advanced rules (code scanning, workflows, file restrictions)
 
 xfg uses the Rulesets API exclusively. If you need legacy branch protection rules, you'll need to manage those separately.
+
+## GitHub Labels
+
+The `xfg sync` command can manage GitHub labels declaratively. See [GitHub Labels](../configuration/labels.md) for full documentation.
+
+```yaml
+settings:
+  labels:
+    bug:
+      color: d73a4a
+      description: "Something isn't working"
+    enhancement:
+      color: a2eeef
+      description: "New feature or request"
+```
+
+```bash
+xfg sync --config ./config.yaml
+```

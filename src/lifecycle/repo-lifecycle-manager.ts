@@ -1,8 +1,11 @@
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
-import { parseGitUrl, type RepoInfo } from "../shared/repo-detector.js";
-import { logger } from "../shared/logger.js";
-import type { RepoConfig } from "../config/types.js";
+import { parseGitUrl, type RepoInfo } from "../repo/index.js";
+import { safeCleanup } from "../shared/cleanup-utils.js";
+import { LifecycleError } from "../shared/errors.js";
+import { NO_OP_DEBUG_LOG, type DebugInfoWarnLog } from "../shared/logger.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
+import type { RepoConfig } from "../config/index.js";
 import type {
   IRepoLifecycleManager,
   IRepoLifecycleProvider,
@@ -18,9 +21,18 @@ import { RepoLifecycleFactory } from "./repo-lifecycle-factory.js";
  */
 export class RepoLifecycleManager implements IRepoLifecycleManager {
   private readonly factory: IRepoLifecycleFactory;
+  private readonly log?: DebugInfoWarnLog;
 
-  constructor(factory?: IRepoLifecycleFactory, retries?: number) {
-    this.factory = factory ?? new RepoLifecycleFactory(undefined, retries);
+  constructor(
+    factory: IRepoLifecycleFactory | undefined,
+    executor: ICommandExecutor,
+    retries: number | undefined,
+    cwd: string,
+    log?: DebugInfoWarnLog
+  ) {
+    this.factory =
+      factory ?? new RepoLifecycleFactory(executor, retries, cwd, log);
+    this.log = log;
   }
 
   async ensureRepo(
@@ -37,14 +49,16 @@ export class RepoLifecycleManager implements IRepoLifecycleManager {
       if (repoConfig.upstream || repoConfig.source) {
         throw error;
       }
-      // Platform doesn't support lifecycle operations yet - skip silently
+      // Platform doesn't support lifecycle operations yet - log and skip
+      this.log?.debug(
+        `Lifecycle: skipping unsupported platform "${repoInfo.type}"`
+      );
       return { repoInfo, action: "existed" };
     }
 
     const { token } = options;
 
-    // Check if repo exists
-    const exists = await provider.exists(repoInfo, token);
+    const exists = await provider.exists({ repo: repoInfo, token });
 
     if (exists) {
       // Repo exists - nothing to do (ignore upstream/source)
@@ -83,7 +97,7 @@ export class RepoLifecycleManager implements IRepoLifecycleManager {
       };
     }
 
-    await provider.create(repoInfo, settings, options.token);
+    await provider.create({ repo: repoInfo, settings, token: options.token });
     await this.waitForRepoReady(provider, repoInfo, options.token);
 
     return {
@@ -108,14 +122,20 @@ export class RepoLifecycleManager implements IRepoLifecycleManager {
     }
 
     if (!provider.fork) {
-      throw new Error(`Platform '${repoInfo.type}' does not support forking`);
+      throw new LifecycleError(
+        `Platform '${repoInfo.type}' does not support forking`
+      );
     }
 
-    // Parse upstream URL to get repo info
     const upstreamInfo = parseGitUrl(repoConfig.upstream!, {
       githubHosts: options.githubHosts,
     });
-    await provider.fork(upstreamInfo, repoInfo, settings, options.token);
+    await provider.fork({
+      upstream: upstreamInfo,
+      target: repoInfo,
+      settings,
+      token: options.token,
+    });
     await this.waitForRepoReady(provider, repoInfo, options.token);
 
     return {
@@ -152,12 +172,12 @@ export class RepoLifecycleManager implements IRepoLifecycleManager {
 
       // Create target and push content
       const provider = this.factory.getProvider(repoInfo.type);
-      await provider.receiveMigration(
-        repoInfo,
+      await provider.receiveMigration({
+        repo: repoInfo,
         sourceDir,
         settings,
-        options.token
-      );
+        token: options.token,
+      });
       await this.waitForRepoReady(provider, repoInfo, options.token);
 
       return {
@@ -165,15 +185,11 @@ export class RepoLifecycleManager implements IRepoLifecycleManager {
         action: "migrated",
       };
     } finally {
-      // Clean up migration source directory
-      try {
-        await rm(sourceDir, { recursive: true, force: true });
-      } catch (cleanupError) {
-        // Log cleanup errors at debug level for troubleshooting
-        logger.debug(
-          `Failed to clean up migration source directory ${sourceDir}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
-        );
-      }
+      await safeCleanup(
+        () => rm(sourceDir, { recursive: true, force: true }),
+        `failed to remove ${sourceDir}`,
+        this.log ?? NO_OP_DEBUG_LOG
+      );
     }
   }
 
@@ -191,13 +207,13 @@ export class RepoLifecycleManager implements IRepoLifecycleManager {
   ): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (await provider.exists(repoInfo, token)) {
+      if (await provider.exists({ repo: repoInfo, token })) {
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
     // Timed out — proceed anyway and let downstream operations handle it
-    logger.info(
+    this.log?.info(
       `Repo ${repoInfo.owner}/${repoInfo.repo} not yet visible after ${timeoutMs}ms, proceeding`
     );
   }

@@ -1,6 +1,7 @@
 # Content Inheritance
 
-xfg uses a 3-level inheritance system that lets you define base configurations once and customize them per-repository.
+xfg uses a multi-level inheritance system that lets you define base configurations once and customize them per-repository. The basic chain is **root → repo overrides**. With [groups](groups.md), the chain becomes **root → group1 → group2 → repo overrides**. With [conditional groups](groups.md#conditional-groups), matching conditional groups merge after explicit groups: **root → groups →
+conditional groups → repo overrides**. When groups use [`extends`](groups.md#group-inheritance), parent groups are automatically included in the chain before the child group.
 
 ## Inheritance Levels
 
@@ -21,7 +22,11 @@ files:
         - metrics
 ```
 
-### Level 2: Per-Repo Overlay
+### Level 2: Group Layers (Optional)
+
+Groups add intermediate layers between root and per-repo overrides. When a repo references groups via `groups: [...]`, each group's files are deep-merged onto the accumulated result in array order. See [Groups](groups.md) for full details.
+
+### Level 3: Per-Repo Overlay
 
 Add or override specific fields for certain repos:
 
@@ -50,7 +55,7 @@ The result is a deep merge of base + overlay:
 }
 ```
 
-### Level 3: Per-Repo Override
+### Level 4: Per-Repo Override
 
 Use `override: true` to completely replace the base content:
 
@@ -71,6 +76,7 @@ The base content is ignored entirely, only the override content is used.
 
 - **Objects**: Fields are merged recursively; overlay fields overwrite base fields
 - **Arrays**: By default, overlay arrays replace base arrays (see [Merge Strategies](merge-strategies.md) to change this)
+- **Settings arrays**: By default, overlay arrays replace base arrays in settings too (rulesets, bypass actors, rules, conditions). Use the [`$arrayMerge` directive](merge-strategies.md#settings-array-merge) to append or prepend instead — same syntax as file content.
 - **Scalars**: Overlay values replace base values
 
 ## File Exclusion
@@ -154,7 +160,7 @@ repos:
           team: platform
           features:
             $arrayMerge: append
-            values:
+            $values:
               - tracing
               - rate-limiting
 

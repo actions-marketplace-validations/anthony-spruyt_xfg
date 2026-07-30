@@ -1,32 +1,19 @@
-import type { RepoInfo } from "../shared/repo-detector.js";
-import type { RepoConfig } from "../config/types.js";
+import type { RepoInfo, RepoPlatform } from "../repo/index.js";
+import type { RepoConfig, RepoVisibility } from "../config/index.js";
 
-/**
- * Supported platforms for lifecycle operations.
- */
-export type LifecyclePlatform = "github" | "azure-devops" | "gitlab";
+export type LifecyclePlatform = RepoPlatform;
 
-/**
- * Result of a lifecycle operation.
- */
 export interface LifecycleResult {
-  /** The repo info (may be updated) */
   repoInfo: RepoInfo;
-  /** What action was taken */
   action: "existed" | "created" | "forked" | "migrated";
-  /** True if skipped due to dry-run */
   skipped?: boolean;
 }
 
-/**
- * Options for lifecycle operations.
- */
+export type LifecycleActionKind = LifecycleResult["action"];
+
 export interface LifecycleOptions {
-  /** Dry-run mode - don't make changes */
   dryRun: boolean;
-  /** Working directory for git operations */
   workDir: string;
-  /** GitHub Enterprise hostnames for URL detection */
   githubHosts?: string[];
   /** Auth token (GitHub App installation token or PAT) for gh CLI commands */
   token?: string;
@@ -37,10 +24,36 @@ export interface LifecycleOptions {
  * Subset of GitHubRepoSettings that makes sense for creation.
  */
 export interface CreateRepoSettings {
-  visibility?: "public" | "private" | "internal";
+  visibility?: RepoVisibility;
   description?: string;
   hasIssues?: boolean;
   hasWiki?: boolean;
+  defaultBranch?: string;
+}
+
+export interface LifecycleExistsParams {
+  repo: RepoInfo;
+  token?: string;
+}
+
+export interface LifecycleCreateParams {
+  repo: RepoInfo;
+  settings?: CreateRepoSettings;
+  token?: string;
+}
+
+export interface LifecycleForkParams {
+  upstream: RepoInfo;
+  target: RepoInfo;
+  settings?: CreateRepoSettings;
+  token?: string;
+}
+
+export interface LifecycleReceiveMigrationParams {
+  repo: RepoInfo;
+  sourceDir: string;
+  settings?: CreateRepoSettings;
+  token?: string;
 }
 
 /**
@@ -48,44 +61,29 @@ export interface CreateRepoSettings {
  * Implementations handle create/fork/receive for a specific platform.
  */
 export interface IRepoLifecycleProvider {
-  /** Platform this provider handles */
   readonly platform: LifecyclePlatform;
 
   /**
    * Check if a repository exists on this platform.
-   * @throws Error on network/auth failures (NOT for "repo not found")
+   * @throws LifecycleError on network/auth failures (NOT for "repo not found")
    */
-  exists(repoInfo: RepoInfo, token?: string): Promise<boolean>;
+  exists(params: LifecycleExistsParams): Promise<boolean>;
 
   /**
    * Create an empty repository.
    */
-  create(
-    repoInfo: RepoInfo,
-    settings?: CreateRepoSettings,
-    token?: string
-  ): Promise<void>;
+  create(params: LifecycleCreateParams): Promise<void>;
 
   /**
    * Fork from an upstream repository.
    * Optional - not all platforms support forking.
    */
-  fork?(
-    upstream: RepoInfo,
-    target: RepoInfo,
-    settings?: CreateRepoSettings,
-    token?: string
-  ): Promise<void>;
+  fork?(params: LifecycleForkParams): Promise<void>;
 
   /**
    * Receive migrated content (repo already created, push content).
    */
-  receiveMigration(
-    repoInfo: RepoInfo,
-    sourceDir: string,
-    settings?: CreateRepoSettings,
-    token?: string
-  ): Promise<void>;
+  receiveMigration(params: LifecycleReceiveMigrationParams): Promise<void>;
 }
 
 /**
@@ -93,7 +91,6 @@ export interface IRepoLifecycleProvider {
  * Implementations handle cloning from a source platform.
  */
 export interface IMigrationSource {
-  /** Platform this source handles */
   readonly platform: LifecyclePlatform;
 
   /**
@@ -103,26 +100,20 @@ export interface IMigrationSource {
   cloneForMigration(repoInfo: RepoInfo, workDir: string): Promise<void>;
 }
 
-/**
- * Factory for getting providers by platform.
- */
 export interface IRepoLifecycleFactory {
   /**
    * Get lifecycle provider for a platform.
-   * @throws Error if platform not supported as target
+   * @throws LifecycleError if platform not supported as target
    */
   getProvider(platform: LifecyclePlatform): IRepoLifecycleProvider;
 
   /**
    * Get migration source for a platform.
-   * @throws Error if platform not supported as source
+   * @throws LifecycleError if platform not supported as source
    */
   getMigrationSource(platform: LifecyclePlatform): IMigrationSource;
 }
 
-/**
- * Manager that orchestrates lifecycle operations before sync.
- */
 export interface IRepoLifecycleManager {
   /**
    * Ensure repository exists, creating/forking/migrating if needed.

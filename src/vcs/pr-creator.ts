@@ -1,21 +1,23 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RepoInfo } from "../shared/repo-detector.js";
-import { getPRStrategy } from "./index.js";
-import type { MergeResult, PRMergeConfig } from "./types.js";
-import { interpolateXfgContent } from "../sync/xfg-template.js";
-import { ICommandExecutor } from "../shared/command-executor.js";
+import type { RepoInfo } from "../repo/index.js";
+import { createPRStrategy } from "./pr-strategy-factory.js";
+import { PRWorkflowExecutor } from "./pr-strategy.js";
+import type { IPRStrategyLogger } from "./pr-strategy.js";
+import type {
+  FileAction,
+  IPRStrategy,
+  MergeResult,
+  PRMergeConfig,
+  PRResult,
+} from "./types.js";
+import { interpolateXfgContent } from "../shared/xfg-template.js";
+import type { ICommandExecutor } from "../shared/command-executor.js";
 
-// Re-export for backwards compatibility and testing
-export { escapeShellArg } from "../shared/shell-utils.js";
+export type { FileAction };
 
-export interface FileAction {
-  fileName: string;
-  action: "create" | "update" | "skip" | "delete";
-}
-
-export interface PROptions {
+interface PROptions {
   repoInfo: RepoInfo;
   branchName: string;
   baseBranch: string;
@@ -26,17 +28,19 @@ export interface PROptions {
   retries?: number;
   /** Custom PR body template */
   prTemplate?: string;
-  /** Optional command executor for shell commands (for testing) */
-  executor?: ICommandExecutor;
+  /** Command executor for shell commands */
+  executor: ICommandExecutor;
   /** GitHub App installation token for authentication */
   token?: string;
+  /** Labels to apply to the created PR */
+  labels?: string[];
+  /** Optional logger for PR strategy debug/warn/info messages */
+  log?: IPRStrategyLogger;
+  /** Pre-constructed PR strategy to reuse (avoids redundant instantiation) */
+  strategy?: IPRStrategy;
 }
 
-export interface PRResult {
-  url?: string;
-  success: boolean;
-  message: string;
-}
+export type { PRResult } from "./types.js";
 
 function loadDefaultTemplate(): string {
   // Try to find PR.md in the project root
@@ -84,8 +88,15 @@ function formatFileChanges(files: FileAction[]): string {
         case "delete":
           actionText = "Deleted";
           break;
-        default:
-          actionText = "Changed";
+        /* c8 ignore next 3 -- filtered out by line 77 */
+        case "skip":
+          actionText = "Skipped";
+          break;
+        /* c8 ignore next 4 */
+        default: {
+          const _exhaustive: never = f.action;
+          throw new Error(`Unexpected action: ${_exhaustive}`);
+        }
       }
       return `- ${actionText} \`${f.fileName}\``;
     })
@@ -123,7 +134,7 @@ export function formatPRBody(
     },
   });
 
-  return result as string;
+  return result;
 }
 
 /**
@@ -144,7 +155,7 @@ export function formatPRTitle(files: FileAction[]): string {
   return `chore: sync ${changedFiles.length} config files`;
 }
 
-export async function createPR(options: PROptions): Promise<PRResult> {
+export function createPR(options: PROptions): Promise<PRResult> {
   const {
     repoInfo,
     branchName,
@@ -156,21 +167,25 @@ export async function createPR(options: PROptions): Promise<PRResult> {
     prTemplate,
     executor,
     token,
+    labels,
+    log,
   } = options;
 
   const title = formatPRTitle(files);
   const body = formatPRBody(files, repoInfo, prTemplate);
 
   if (dryRun) {
-    return {
+    return Promise.resolve({
       success: true,
       message: `[DRY RUN] Would create PR: "${title}"`,
-    };
+    });
   }
 
-  // Get the appropriate strategy and execute
-  const strategy = getPRStrategy(repoInfo, executor);
-  return strategy.execute({
+  // Get the appropriate strategy and execute via workflow executor
+  const resolvedStrategy =
+    options.strategy ?? createPRStrategy(repoInfo, executor, log);
+  const workflow = new PRWorkflowExecutor(resolvedStrategy, log);
+  return workflow.execute({
     repoInfo,
     title,
     body,
@@ -179,23 +194,28 @@ export async function createPR(options: PROptions): Promise<PRResult> {
     workDir,
     retries,
     token,
+    labels,
   });
 }
 
-export interface MergePROptions {
+interface MergePROptions {
   repoInfo: RepoInfo;
   prUrl: string;
   mergeConfig: PRMergeConfig;
   workDir: string;
   dryRun?: boolean;
   retries?: number;
-  /** Optional command executor for shell commands (for testing) */
-  executor?: ICommandExecutor;
+  /** Command executor for shell commands */
+  executor: ICommandExecutor;
   /** GitHub App installation token for authentication */
   token?: string;
+  /** Optional logger for PR strategy debug/warn/info messages */
+  log?: IPRStrategyLogger;
+  /** Pre-constructed PR strategy to reuse (avoids redundant instantiation) */
+  strategy?: IPRStrategy;
 }
 
-export async function mergePR(options: MergePROptions): Promise<MergeResult> {
+export function mergePR(options: MergePROptions): Promise<MergeResult> {
   const {
     repoInfo,
     prUrl,
@@ -205,6 +225,7 @@ export async function mergePR(options: MergePROptions): Promise<MergeResult> {
     retries,
     executor,
     token,
+    log,
   } = options;
 
   if (dryRun) {
@@ -214,17 +235,19 @@ export async function mergePR(options: MergePROptions): Promise<MergeResult> {
         : mergeConfig.mode === "auto"
           ? "enable auto-merge"
           : "leave open for manual review";
-    return {
+    return Promise.resolve({
       success: true,
       message: `[DRY RUN] Would ${modeText}`,
       merged: false,
-    };
+    });
   }
 
   // Get the appropriate strategy and execute merge
-  const strategy = getPRStrategy(repoInfo, executor);
-  return strategy.merge({
+  const resolvedStrategy =
+    options.strategy ?? createPRStrategy(repoInfo, executor, log);
+  return resolvedStrategy.merge({
     prUrl,
+    repoInfo,
     config: mergeConfig,
     workDir,
     retries,

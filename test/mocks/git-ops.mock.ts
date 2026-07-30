@@ -1,4 +1,6 @@
-import type { IGitOps } from "../../src/git-ops.js";
+import type { ILocalGitOps, INetworkGitOps } from "../../src/vcs/types.js";
+
+type IGitOps = ILocalGitOps & INetworkGitOps;
 
 export interface GitOpsMockConfig {
   // Return value overrides
@@ -104,6 +106,12 @@ export function createMockGitOps(
       calls.setExecutable.push({ fileName });
     },
 
+    async clearExecutable(_fileName: string): Promise<void> {},
+
+    async getFileMode(_fileName: string): Promise<"100755" | "100644" | null> {
+      return "100644";
+    },
+
     getFileContent(fileName: string): string | null {
       if (typeof config.fileContent === "function") {
         return config.fileContent(fileName);
@@ -127,9 +135,19 @@ export function createMockGitOps(
       return config.changedFiles ?? [];
     },
 
+    async stageAll(): Promise<void> {},
+
     async hasStagedChanges(): Promise<boolean> {
       return config.hasStagedChanges ?? true;
     },
+
+    async lsRemote(_branchName: string): Promise<string> {
+      return "";
+    },
+
+    async pushRefspec(_refspec: string): Promise<void> {},
+
+    async fetchBranch(_branchName: string): Promise<void> {},
 
     async fileExistsOnBranch(
       fileName: string,
@@ -146,6 +164,10 @@ export function createMockGitOps(
         return config.fileExists(fileName);
       }
       return config.fileExists ?? false;
+    },
+
+    async getDefaultBranchLocal(): Promise<{ branch: string; method: string }> {
+      return { branch: "main", method: "mock fallback" };
     },
   };
 

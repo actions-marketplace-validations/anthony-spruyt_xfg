@@ -1,4 +1,4 @@
-import type { FileAction } from "../vcs/pr-creator.js";
+import type { FileAction } from "../vcs/index.js";
 
 /**
  * Format a commit message based on the files being changed.

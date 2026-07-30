@@ -1,9 +1,9 @@
 # GitHub Rulesets
 
-xfg can manage GitHub Rulesets declaratively using the `settings` command. Define rulesets in your config file, and xfg will create, update, or delete them to match your desired state.
+xfg can manage GitHub Rulesets declaratively using the `sync` command. Define rulesets in your config file, and xfg will create, update, or delete them to match your desired state.
 
 !!! note "GitHub-Only Feature"
-    Rulesets are only available for GitHub repositories. Azure DevOps and GitLab repos will be skipped when running `xfg settings`.
+    Rulesets are only available for GitHub repositories. Azure DevOps and GitLab repos will be skipped when running `xfg sync`.
 
 ## Quick Start
 
@@ -38,7 +38,7 @@ repos:
 xfg sync -c config.yaml
 
 # Apply rulesets
-xfg settings -c config.yaml
+xfg sync -c config.yaml
 ```
 
 ## Why Rulesets?
@@ -180,12 +180,12 @@ Require specific GitHub Actions workflows to pass:
 
 All pattern rules support the same parameters:
 
-| Parameter  | Type    | Description                                                |
-| ---------- | ------- | ---------------------------------------------------------- |
-| `name`     | string  | Display name for the rule (optional)                       |
-| `operator` | string  | `starts_with`, `ends_with`, `contains`, or `regex`         |
-| `pattern`  | string  | The pattern to match                                       |
-| `negate`   | boolean | If true, the rule applies when the pattern does NOT match  |
+| Parameter  | Type    | Description                                               |
+| ---------- | ------- | --------------------------------------------------------- |
+| `name`     | string  | Display name for the rule (optional)                      |
+| `operator` | string  | `starts_with`, `ends_with`, `contains`, or `regex`        |
+| `pattern`  | string  | The pattern to match                                      |
+| `negate`   | boolean | If true, the rule applies when the pattern does NOT match |
 
 ```yaml
 - type: commit_message_pattern
@@ -244,6 +244,8 @@ All pattern rules support the same parameters:
 ```
 
 ## Inheritance and Opt-Out
+
+Rulesets from [conditional groups](groups.md#conditional-groups) merge after explicit group rulesets and before repo overrides. Per-repo `inherit: false` discards all inherited rulesets including those from conditional groups.
 
 Like files, rulesets support inheritance with options to opt out.
 
@@ -339,6 +341,50 @@ repos:
             - type: required_signatures
 ```
 
+### Appending to Arrays
+
+By default, per-repo arrays (like `bypassActors` and `rules`) replace inherited arrays entirely. Use the `$arrayMerge` directive to append or prepend instead:
+
+```yaml
+settings:
+  rulesets:
+    main-protection:
+      target: branch
+      enforcement: active
+      bypassActors:
+        - actorId: 2740          # Renovate — shared
+          actorType: Integration
+          bypassMode: always
+      rules:
+        - type: pull_request
+          parameters:
+            requiredApprovingReviewCount: 1
+
+repos:
+  # Add a repo-specific bypass actor without losing Renovate
+  - git: git@github.com:your-org/special-repo.git
+    settings:
+      rulesets:
+        main-protection:
+          bypassActors:
+            $arrayMerge: append
+            $values:
+              - actorId: 123456
+                actorType: Team
+                bypassMode: pull_request
+          rules:
+            $arrayMerge: append
+            $values:
+              - type: required_status_checks
+                parameters:
+                  requiredStatusChecks:
+                    - context: "ci/build"
+```
+
+Result for `special-repo`: `bypassActors` has both Renovate and the team; `rules` has both `pull_request` and `required_status_checks`.
+
+Available strategies: `append` (add after), `prepend` (add before), `replace` (same as default). See [Merge Strategies](merge-strategies.md#settings-array-merge) for more details.
+
 ## Bypass Actors
 
 Allow specific users, teams, or integrations to bypass rules:
@@ -389,12 +435,12 @@ settings:
       # ...
 ```
 
-If you later remove `main-protection` from the config and run `xfg settings`, it will be deleted from the repository.
+If you later remove `main-protection` from the config and run `xfg sync`, it will be deleted from the repository.
 
 Use `--no-delete` to skip orphan deletion:
 
 ```bash
-xfg settings -c config.yaml --no-delete
+xfg sync -c config.yaml --no-delete
 ```
 
 ## Dry Run
@@ -402,7 +448,7 @@ xfg settings -c config.yaml --no-delete
 Preview changes without applying them:
 
 ```bash
-xfg settings -c config.yaml --dry-run
+xfg sync -c config.yaml --dry-run
 ```
 
 Output shows planned changes:
@@ -422,16 +468,15 @@ Found 2 repositories with rulesets
 
 ## Combining with File Sync
 
-The `sync` and `settings` commands are independent. Run them together or separately:
+File sync and settings are handled together by a single command:
 
 ```bash
-# Sync files and apply rulesets
-xfg sync -c config.yaml && xfg settings -c config.yaml
-
-# Or run separately
+# Sync files and apply rulesets in one run
 xfg sync -c config.yaml
-xfg settings -c config.yaml --dry-run  # Preview first
-xfg settings -c config.yaml            # Apply
+
+# Preview first, then apply
+xfg sync -c config.yaml --dry-run  # Preview first
+xfg sync -c config.yaml            # Apply
 ```
 
 ## Complete Example

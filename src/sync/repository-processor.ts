@@ -1,54 +1,47 @@
 import type { RepoConfig } from "../config/index.js";
-import type { RepoInfo } from "../shared/repo-detector.js";
-import { GitOps } from "../vcs/git-ops.js";
-import { AuthenticatedGitOps } from "../vcs/authenticated-git-ops.js";
-import { logger, ILogger } from "../shared/logger.js";
-import { hasGitHubAppCredentials } from "../vcs/index.js";
-import { GitHubAppTokenManager } from "../vcs/github-app-token-manager.js";
+import type { RepoInfo } from "../repo/index.js";
+import type { ILogger } from "../shared/logger.js";
 import {
-  FileWriter,
-  ManifestManager,
-  BranchManager,
-  AuthOptionsBuilder,
-  RepositorySession,
-  CommitPushManager,
-  FileSyncOrchestrator,
-  PRMergeHandler,
-  FileSyncStrategy,
-  ManifestStrategy,
-  SyncWorkflow,
-  loadManifest,
-  updateManifestRulesets,
-  MANIFEST_FILENAME,
-  type IFileWriter,
-  type IManifestManager,
-  type IBranchManager,
-  type IAuthOptionsBuilder,
-  type IRepositorySession,
-  type ICommitPushManager,
-  type IFileSyncOrchestrator,
-  type IPRMergeHandler,
-  type ISyncWorkflow,
-  type IRepositoryProcessor,
-  type GitOpsFactory,
-  type ProcessorOptions,
-  type ProcessorResult,
-  type FileChangeDetail,
-} from "./index.js";
-import { getRepoDisplayName } from "../shared/repo-detector.js";
+  GitOps,
+  AuthenticatedGitOps,
+  type GitHubAppTokenManager,
+} from "../vcs/index.js";
+import { FileWriter } from "./file-writer.js";
+import { ManifestManager } from "./manifest-manager.js";
+import { BranchManager } from "./branch-manager.js";
+import { AuthOptionsBuilder } from "./auth-options-builder.js";
+import { RepositorySession } from "./repository-session.js";
+import { CommitPushManager } from "./commit-push-manager.js";
+import { FileSyncOrchestrator } from "./file-sync-orchestrator.js";
+import { PRMergeHandler } from "./pr-merge-handler.js";
+import { FileSyncStrategy } from "./file-sync-strategy.js";
+import { SyncWorkflow } from "./sync-workflow.js";
+import type {
+  IFileWriter,
+  IManifestManager,
+  IBranchManager,
+  IAuthOptionsBuilder,
+  IRepositorySession,
+  ICommitPushManager,
+  IFileSyncOrchestrator,
+  IPRMergeHandler,
+  ISyncWorkflow,
+  IRepositoryProcessor,
+  GitOpsFactory,
+  ProcessorOptions,
+  ProcessorResult,
+} from "./types.js";
 
 /**
- * Thin facade that delegates to SyncWorkflow with appropriate strategy.
- * process() uses FileSyncStrategy, updateManifestOnly() uses ManifestStrategy.
+ * Thin facade that delegates to SyncWorkflow with FileSyncStrategy.
  */
 export class RepositoryProcessor implements IRepositoryProcessor {
   private readonly syncWorkflow: ISyncWorkflow;
   private readonly fileSyncOrchestrator: IFileSyncOrchestrator;
-  private readonly log: ILogger;
 
   constructor(
-    gitOpsFactory?: GitOpsFactory,
-    log?: ILogger,
+    gitOpsFactory: GitOpsFactory | undefined,
+    log: ILogger,
     components?: {
       fileWriter?: IFileWriter;
       manifestManager?: IManifestManager;
@@ -59,40 +52,43 @@ export class RepositoryProcessor implements IRepositoryProcessor {
       fileSyncOrchestrator?: IFileSyncOrchestrator;
       prMergeHandler?: IPRMergeHandler;
       syncWorkflow?: ISyncWorkflow;
+      tokenManager?: GitHubAppTokenManager | null;
+      envToken?: string;
     }
   ) {
-    const factory =
+    const factory: GitOpsFactory =
       gitOpsFactory ??
-      ((opts, auth) => new AuthenticatedGitOps(new GitOps(opts), auth));
-    const logInstance = log ?? logger;
-    this.log = logInstance;
+      ((opts, auth, retries) => {
+        const gitOps = new GitOps({ ...opts, log: log });
+        return new AuthenticatedGitOps({
+          localOps: gitOps,
+          executor: opts.executor,
+          workDir: opts.workDir,
+          retries: retries ?? 3,
+          auth,
+          log,
+        });
+      });
 
-    // Initialize token manager for auth builder
-    const tokenManager = hasGitHubAppCredentials()
-      ? new GitHubAppTokenManager(
-          process.env.XFG_GITHUB_APP_ID!,
-          process.env.XFG_GITHUB_APP_PRIVATE_KEY!
-        )
-      : null;
+    const tokenManager = components?.tokenManager ?? null;
 
     const fileWriter = components?.fileWriter ?? new FileWriter();
     const manifestManager =
-      components?.manifestManager ?? new ManifestManager();
-    const branchManager = components?.branchManager ?? new BranchManager();
+      components?.manifestManager ?? new ManifestManager(log);
+    const branchManager = components?.branchManager ?? new BranchManager(log);
     const authOptionsBuilder =
       components?.authOptionsBuilder ??
-      new AuthOptionsBuilder(tokenManager, logInstance);
+      new AuthOptionsBuilder(tokenManager, log, components?.envToken);
     const repositorySession =
-      components?.repositorySession ??
-      new RepositorySession(factory, logInstance);
+      components?.repositorySession ?? new RepositorySession(factory, log);
     const commitPushManager =
-      components?.commitPushManager ?? new CommitPushManager(logInstance);
+      components?.commitPushManager ?? new CommitPushManager(log);
     const prMergeHandler =
-      components?.prMergeHandler ?? new PRMergeHandler(logInstance);
+      components?.prMergeHandler ?? new PRMergeHandler(log);
 
     this.fileSyncOrchestrator =
       components?.fileSyncOrchestrator ??
-      new FileSyncOrchestrator(fileWriter, manifestManager, logInstance);
+      new FileSyncOrchestrator(fileWriter, manifestManager, log);
 
     this.syncWorkflow =
       components?.syncWorkflow ??
@@ -102,7 +98,7 @@ export class RepositoryProcessor implements IRepositoryProcessor {
         branchManager,
         commitPushManager,
         prMergeHandler,
-        logInstance
+        log
       );
   }
 
@@ -112,57 +108,6 @@ export class RepositoryProcessor implements IRepositoryProcessor {
     options: ProcessorOptions
   ): Promise<ProcessorResult> {
     const strategy = new FileSyncStrategy(this.fileSyncOrchestrator);
-    return this.syncWorkflow.execute(repoConfig, repoInfo, options, strategy);
-  }
-
-  async updateManifestOnly(
-    repoInfo: RepoInfo,
-    repoConfig: RepoConfig,
-    options: ProcessorOptions,
-    manifestUpdate: { rulesets: string[] }
-  ): Promise<ProcessorResult> {
-    const repoName = getRepoDisplayName(repoInfo);
-    const { workDir, dryRun } = options;
-
-    // Pre-check manifest changes (preserves original early-return behavior)
-    const existingManifest = loadManifest(workDir);
-    const rulesetsWithDeleteOrphaned = new Map<string, boolean | undefined>(
-      manifestUpdate.rulesets.map((name) => [name, true])
-    );
-    const { manifest: newManifest } = updateManifestRulesets(
-      existingManifest,
-      options.configId,
-      rulesetsWithDeleteOrphaned
-    );
-
-    const existingConfigs = existingManifest?.configs ?? {};
-    if (
-      JSON.stringify(existingConfigs) === JSON.stringify(newManifest.configs)
-    ) {
-      return {
-        success: true,
-        repoName,
-        message: "No manifest changes detected",
-        skipped: true,
-      };
-    }
-
-    const manifestFileChange: FileChangeDetail[] = [
-      { path: MANIFEST_FILENAME, action: "update" },
-    ];
-
-    if (dryRun) {
-      this.log.info(`Would update ${MANIFEST_FILENAME} with rulesets`);
-      return {
-        success: true,
-        repoName,
-        message: "Would update manifest (dry-run)",
-        fileChanges: manifestFileChange,
-      };
-    }
-
-    // Delegate to workflow for actual commit/push/PR
-    const strategy = new ManifestStrategy(manifestUpdate, this.log);
     return this.syncWorkflow.execute(repoConfig, repoInfo, options, strategy);
   }
 }

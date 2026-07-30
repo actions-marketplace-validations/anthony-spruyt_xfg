@@ -1,80 +1,98 @@
-import { RepoConfig } from "../config/index.js";
-import { RepoInfo } from "../shared/repo-detector.js";
-import {
-  RepositoryProcessor,
-  type ProcessorResult,
-  type ProcessorOptions,
-} from "../sync/index.js";
-import {
-  RulesetProcessor,
-  RulesetProcessorOptions,
-  RulesetProcessorResult,
-} from "../settings/rulesets/processor.js";
-import {
-  RepoSettingsProcessor,
-  type IRepoSettingsProcessor,
-} from "../settings/repo-settings/processor.js";
+import type { MergeMode, MergeStrategy, RepoConfig } from "../config/index.js";
+import type { IRepoLifecycleManager } from "../lifecycle/index.js";
+import type { IRepositoryProcessor, FileChangeDetail } from "../sync/index.js";
+import type {
+  ISettingsProcessor,
+  IRulesetProcessor,
+  IRepoSettingsProcessor,
+  ILabelsProcessor,
+  ICodeScanningProcessor,
+  IVariablesProcessor,
+  BaseProcessorResult,
+} from "../settings/index.js";
+import type { RepoInfo } from "../repo/index.js";
+import type { ResultsCollector } from "./results-collector.js";
+import type { Logger } from "../shared/logger.js";
 
-/**
- * Processor interface for dependency injection in tests.
- */
-export interface IRepositoryProcessor {
-  process(
-    repoConfig: RepoConfig,
-    repoInfo: RepoInfo,
-    options: ProcessorOptions
-  ): Promise<ProcessorResult>;
-  updateManifestOnly(
-    repoInfo: RepoInfo,
-    repoConfig: RepoConfig,
-    options: ProcessorOptions,
-    manifestUpdate: { rulesets: string[] }
-  ): Promise<ProcessorResult>;
-}
-
-/**
- * Factory function type for creating processors.
- */
 export type ProcessorFactory = () => IRepositoryProcessor;
 
-/**
- * Default factory that creates a real RepositoryProcessor.
- */
-export const defaultProcessorFactory: ProcessorFactory = () =>
-  new RepositoryProcessor();
+export type SettingsProcessorFactory<T extends ISettingsProcessor> = () => T;
 
-/**
- * Ruleset processor interface for dependency injection in tests.
- */
-export interface IRulesetProcessor {
-  process(
-    repoConfig: RepoConfig,
-    repoInfo: RepoInfo,
-    options: RulesetProcessorOptions
-  ): Promise<RulesetProcessorResult>;
+export type RulesetProcessorFactory =
+  SettingsProcessorFactory<IRulesetProcessor>;
+export type RepoSettingsProcessorFactory =
+  SettingsProcessorFactory<IRepoSettingsProcessor>;
+export type LabelsProcessorFactory = SettingsProcessorFactory<ILabelsProcessor>;
+export type CodeScanningProcessorFactory =
+  SettingsProcessorFactory<ICodeScanningProcessor>;
+export type VariablesProcessorFactory =
+  SettingsProcessorFactory<IVariablesProcessor>;
+
+export type SettingsKind =
+  | "rulesets"
+  | "labels"
+  | "repo"
+  | "codeScanning"
+  | "variables";
+
+export interface SettingsProcessorFactories {
+  rulesets: RulesetProcessorFactory;
+  labels: LabelsProcessorFactory;
+  repo: RepoSettingsProcessorFactory;
+  codeScanning: CodeScanningProcessorFactory;
+  variables: VariablesProcessorFactory;
 }
 
 /**
- * Factory function type for creating ruleset processors.
+ * Dependencies for the sync command (dependency injection).
  */
-export type RulesetProcessorFactory = () => IRulesetProcessor;
+export interface SyncDependencies {
+  processorFactory?: ProcessorFactory;
+  lifecycleManager?: IRepoLifecycleManager;
+  settingsProcessorFactories?: Partial<SettingsProcessorFactories>;
+}
+
+export interface SharedOptions {
+  config: string;
+  dryRun?: boolean;
+  workDir?: string;
+  retries?: number;
+  noDelete?: boolean;
+}
+
+export interface SyncOptions extends SharedOptions {
+  branch?: string;
+  merge?: MergeMode;
+  mergeStrategy?: MergeStrategy;
+  deleteBranch?: boolean;
+}
+
+export interface SyncResultEntry {
+  repoName: string;
+  success: boolean;
+  fileChanges: FileChangeDetail[];
+  prUrl?: string;
+  mergeOutcome?: MergeMode;
+  error?: string;
+}
+
+export interface SettingsResult extends BaseProcessorResult {
+  planOutput?: { lines?: string[] };
+  warnings?: string[];
+}
 
 /**
- * Default factory that creates a real RulesetProcessor.
+ * Context for applying repo settings (rulesets, labels, repo config).
+ * Groups parameters that were previously passed individually.
  */
-export const defaultRulesetProcessorFactory: RulesetProcessorFactory = () =>
-  new RulesetProcessor();
-
-/**
- * Repo settings processor factory function type.
- */
-export type RepoSettingsProcessorFactory = () => IRepoSettingsProcessor;
-
-/**
- * Default factory that creates a real RepoSettingsProcessor.
- */
-export const defaultRepoSettingsProcessorFactory: RepoSettingsProcessorFactory =
-  () => new RepoSettingsProcessor();
-
-// Re-export IRepoSettingsProcessor for convenience
-export type { IRepoSettingsProcessor };
+export interface ApplyRepoSettingsContext {
+  repoConfig: RepoConfig;
+  repoInfo: RepoInfo;
+  repoName: string;
+  repoNumber: number;
+  options: SyncOptions;
+  token: string | undefined;
+  settingsCollector: ResultsCollector;
+  factories: SettingsProcessorFactories;
+  logger: Logger;
+}

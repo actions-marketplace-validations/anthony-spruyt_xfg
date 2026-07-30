@@ -100,10 +100,10 @@ The devcontainer expects these directories on your host machine:
 ~/.ssh/
 ├── id_ed25519              # SSH private key
 ├── id_ed25519.pub          # SSH public key
-├── known_hosts             # Known host keys (required mount)
-└── allowed_signers         # SSH signing trust store (required mount)
+├── known_hosts             # Known host keys
+└── allowed_signers         # SSH signing trust store
 
-~/.gitconfig                # Git identity and signing config (mounted read-only)
+~/.gitconfig                # Git identity and signing config
 ```
 
 Create the required structure:
@@ -134,8 +134,7 @@ Create a classic `GH_TOKEN` at [GitHub Settings > Developer settings > Personal 
 
 ## SSH Agent Setup
 
-The devcontainer uses SSH agent forwarding via socket mount. Your private keys stay on
-the host and are never copied into the container. Follow the instructions for your platform below.
+The devcontainer uses SSH agent forwarding via socket mount. Your private keys stay on the host and are never copied into the container. Follow the instructions for your platform below.
 
 ### macOS
 
@@ -229,7 +228,7 @@ Then add the same public key as a **signing key** at [GitHub Settings > SSH and 
 
 The SSH agent socket mount can fail after a reboot, sleep/wake cycle, or agent restart. The symptoms differ by platform but the root cause is the same: Docker tries to mount a socket path that no longer exists.
 
-#### macOS
+#### macOS (SSH agent socket)
 
 **Error**: `bind source path does not exist: /socket_mnt/private/tmp/com.apple.launchd.…/Listeners`
 
@@ -284,6 +283,7 @@ If the symlink is missing or broken after reboot, ensure `keychain` is installed
    ```
 
 2. Open the folder in VS Code
+
 3. When prompted, click "Reopen in Container" (or run `Dev Containers: Reopen in Container` from the command palette)
 
 Setup is verified automatically when the container is created. The `post-create.sh` script installs dependencies, builds the project, and runs verification tests for Docker-in-Docker, pre-commit hooks, safe-chain, GitHub CLI, SSH agent forwarding, and Claude Code CLI.

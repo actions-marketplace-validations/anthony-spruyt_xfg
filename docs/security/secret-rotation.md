@@ -4,13 +4,13 @@ Rotate credentials used by xfg regularly to limit the blast radius of a compromi
 
 ## Recommended Schedules
 
-| Credential | Recommended Schedule |
-| --- | --- |
-| GH_TOKEN (GitHub PAT) | Every 90 days |
-| GitHub App private key (.pem) | Every 6 months |
-| Azure DevOps PAT / service principal | Every 90 days |
-| GitLab PAT / project access token | Every 90 days |
-| CONTEXT7_API_KEY / MCP keys | Per provider policy |
+| Credential                           | Recommended Schedule |
+| ------------------------------------ | -------------------- |
+| GH_TOKEN (GitHub PAT)                | Every 90 days        |
+| GitHub App private key (.pem)        | Every 6 months       |
+| Azure DevOps PAT / service principal | Every 90 days        |
+| GitLab PAT / project access token    | Every 90 days        |
+| CONTEXT7_API_KEY / MCP keys          | Per provider policy  |
 
 ## GitHub PAT (GH_TOKEN)
 

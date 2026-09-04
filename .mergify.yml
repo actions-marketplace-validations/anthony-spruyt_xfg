@@ -4,9 +4,13 @@ queue_rules:
     batch_size: 1
     max_checks_retries: 3
     merge_conditions:
-      - "#approved-reviews-by >= 1"
       - "-draft"
       - "check-success = summary / Check Results"
+      - or:
+          - "#approved-reviews-by >= 1"
+          - and:
+              - "label=autorelease: pending"
+              - "author = repo-operator-release-bot[bot]"
 priority_rules:
   - name: "revert PRs"
     conditions:
@@ -32,6 +36,17 @@ pull_request_rules:
       - "label = agent/revert"
       - "author~=.*\\[bot\\]$"
       - "-label = blocked"
+      - "-merged"
+    actions:
+      queue: {}
+  - name: "auto-merge release-please PRs"
+    conditions:
+      - "label=autorelease: pending"
+      - "author = repo-operator-release-bot[bot]"
+      - "head~=^release-please--branches--"
+      - "files~=^\\.release-please-manifest\\.json$"
+      - "-label = blocked"
+      - "-draft"
       - "-merged"
     actions:
       queue: {}
@@ -61,8 +76,17 @@ merge_protections:
       - "base = main"
       - "-label = agent/revert"
       - "-label = emergency/merge"
+      - "-label=autorelease: pending"
     success_conditions:
       - "#approved-reviews-by >= 1"
+  - name: "release-please"
+    if:
+      - "base = main"
+      - "label=autorelease: pending"
+    success_conditions:
+      - "author = repo-operator-release-bot[bot]"
+      - "head~=^release-please--branches--"
+      - "files~=^\\.release-please-manifest\\.json$"
   - name: "revert-approved"
     if:
       - "base = main"
